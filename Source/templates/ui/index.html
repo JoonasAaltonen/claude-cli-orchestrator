@@ -1,0 +1,685 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orchestrator</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --panel: #ffffff; --line: #e4e2dd; --ink: #23211d;
+    --muted: #6f6a61; --accent: #8a5a2b; --ok: #2f6f4f; --warn: #8a6d1f; --bad: #96341f;
+    --chip: #f2efe9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16150f; --panel: #1e1d16; --line: #322f25; --ink: #eae6dc;
+      --muted: #9a9383; --accent: #d9a05b; --ok: #7fbf95; --warn: #d9bb63; --bad: #e0806a;
+      --chip: #26241b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;
+    padding: 1rem 1.5rem; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 5;
+  }
+  h1 { font-size: 1rem; margin: 0; letter-spacing: .02em; }
+  h2 { font-size: .95rem; margin: 1.6rem 0 .6rem; }
+  .grow { flex: 1; }
+  .muted { color: var(--muted); }
+  .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: .85em; }
+  nav { display: flex; gap: .25rem; padding: 0 1.5rem; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  nav button {
+    background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted);
+    padding: .6rem .8rem; cursor: pointer; font: inherit; font-size: .9rem;
+  }
+  nav button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+  main { padding: 1.25rem 1.5rem 4rem; max-width: 1100px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: .85rem 1rem; margin-bottom: .6rem;
+  }
+  .card.click { cursor: pointer; }
+  .card.click:hover { border-color: var(--accent); }
+  .row { display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap; }
+  .chip {
+    background: var(--chip); border-radius: 3px; padding: .1rem .4rem;
+    font-size: .75rem; letter-spacing: .03em; text-transform: uppercase; color: var(--muted);
+  }
+  .chip.ok { color: var(--ok); } .chip.warn { color: var(--warn); } .chip.bad { color: var(--bad); }
+  table { border-collapse: collapse; width: 100%; font-size: .88rem; }
+  th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: var(--chip); }
+  .scroll { overflow-x: auto; }
+  .msgbody { max-height: 24rem; overflow-y: auto; }
+  pre {
+    background: var(--chip); border-radius: 4px; padding: .7rem .8rem; overflow-x: auto;
+    font-family: ui-monospace, Consolas, monospace; font-size: .82rem; white-space: pre-wrap; margin: .5rem 0 0;
+  }
+  .banner { border-left: 3px solid var(--bad); padding-left: .8rem; margin-bottom: 1rem; }
+  .empty { color: var(--muted); font-style: italic; padding: .6rem 0; }
+  dialog {
+    border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink);
+    max-width: 820px; width: 92vw; padding: 0;
+  }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  .dlg-head { display: flex; gap: 1rem; align-items: baseline; padding: .9rem 1.1rem; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
+  .dlg-body { padding: .9rem 1.1rem 1.4rem; max-height: 70vh; overflow-y: auto; }
+  .msg { border-left: 2px solid var(--line); padding: .1rem 0 .1rem .8rem; margin: .9rem 0; }
+  .msg.mine { border-left-color: var(--accent); }
+  button.plain { background: none; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); padding: .3rem .7rem; cursor: pointer; font: inherit; font-size: .85rem; }
+  button.plain:hover { border-color: var(--accent); }
+  button.plain[disabled] { opacity: .5; cursor: not-allowed; }
+  button.go {
+    background: var(--accent); border: 1px solid var(--accent); border-radius: 4px;
+    color: var(--bg); padding: .45rem 1rem; cursor: pointer; font: inherit; font-weight: 600;
+  }
+  button.go[disabled] { opacity: .5; cursor: not-allowed; }
+  button.danger { border-color: var(--bad); color: var(--bad); }
+  label { display: block; font-size: .8rem; color: var(--muted); margin: .6rem 0 .15rem; }
+  input[type=text], textarea, select {
+    width: 100%; background: var(--bg); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 4px; padding: .4rem .5rem; font: inherit; font-size: .9rem;
+  }
+  textarea { min-height: 7rem; resize: vertical; }
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0 .8rem; }
+  #consoleLines {
+    background: var(--chip); border-radius: 4px; padding: .6rem .7rem; max-height: 22rem;
+    overflow-y: auto; font-family: ui-monospace, Consolas, monospace; font-size: .8rem;
+    white-space: pre-wrap;
+  }
+  .live::before {
+    content: ''; display: inline-block; width: .5rem; height: .5rem; border-radius: 50%;
+    background: var(--ok); margin-right: .4rem; animation: pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .25 } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Orchestrator</h1>
+  <span class="muted mono" id="commsRoot"></span>
+  <span class="grow"></span>
+  <span id="runState"></span>
+  <span id="quota"></span>
+  <span id="killState"></span>
+  <button class="plain" id="refresh">Refresh</button>
+</header>
+
+<nav>
+  <button data-tab="now" aria-selected="true">Now</button>
+  <button data-tab="ledger" aria-selected="false">Ledger</button>
+  <button data-tab="agents" aria-selected="false">Agents</button>
+  <button data-tab="runs" aria-selected="false">Runs</button>
+</nav>
+
+<main>
+  <div id="error"></div>
+
+  <div id="nowControls">
+  <div class="card" id="starter">
+    <div class="row">
+      <button class="go" id="btnCompose">Start with instructions</button>
+      <button class="go" id="btnPending">Pick up pending work</button>
+      <span class="grow"></span>
+      <button class="plain danger" id="btnKill">Stop everything</button>
+    </div>
+    <div class="muted" style="margin-top:.45rem" id="starterHint">
+      <strong>Start with instructions</strong> writes your request to the ledger, then runs.
+      <strong>Pick up pending work</strong> sweeps agent outboxes first, then runs whatever is
+      outstanding &mdash; no message from you.
+    </div>
+  </div>
+
+  <form class="card" id="compose" hidden>
+    <div class="cols">
+      <div>
+        <label for="fTo">To &mdash; one agent</label>
+        <select id="fTo"></select>
+      </div>
+      <div>
+        <label for="fType">Type</label>
+        <select id="fType">
+          <option value="request">request</option>
+          <option value="response">response</option>
+          <option value="report">report</option>
+          <option value="decision">decision</option>
+          <option value="signoff">signoff</option>
+        </select>
+      </div>
+    </div>
+    <label for="fSummary">Summary &mdash; the line every agent sees first</label>
+    <input type="text" id="fSummary" placeholder="How did Q3 go and what should we do about it">
+    <label for="fBody">Body</label>
+    <textarea id="fBody" placeholder="Get whatever figures you need, then one paragraph and one recommendation."></textarea>
+
+    <label>Likely also needed <span class="muted">&mdash; named in the body, not addressed</span></label>
+    <div id="fAlso" class="row"></div>
+    <div class="muted" style="font-size:.8rem;margin-top:.3rem">
+      Addressing two agents starts them both on the same request, separately and in
+      parallel, and the thread stays open until <em>both</em> answer. Naming them here
+      instead tells the one agent who else it can call on.
+    </div>
+    <details>
+      <summary class="muted" style="cursor:pointer;margin:.7rem 0 .2rem">More</summary>
+      <div class="cols">
+        <div><label for="fReplyTo">Reply to (row ID)</label><input type="text" id="fReplyTo" placeholder="0004"></div>
+        <div><label for="fNeeds">Needs sign-off from</label><input type="text" id="fNeeds" placeholder="blank unless it crosses a publication boundary"></div>
+        <div><label for="fHops">Hop budget</label><input type="text" id="fHops" placeholder="default"></div>
+        <div><label for="fCeiling">Invocation ceiling</label><input type="text" id="fCeiling" placeholder="default"></div>
+      </div>
+    </details>
+    <div class="row" style="margin-top:.9rem">
+      <button class="go" type="submit" id="btnSend">Write it and run</button>
+      <button class="plain" type="button" id="btnWriteOnly">Write only, do not run</button>
+      <button class="plain" type="button" id="btnCancel">Cancel</button>
+    </div>
+  </form>
+
+  <div class="card" id="console" hidden>
+    <div class="row">
+      <strong id="consoleTitle">Run</strong>
+      <span class="grow"></span>
+      <span class="muted" id="consoleCost"></span>
+      <button class="plain" id="btnHideConsole">Hide</button>
+    </div>
+    <div id="consoleLines" style="margin-top:.5rem"></div>
+    <div id="consoleOutcomes"></div>
+  </div>
+  </div>
+
+  <section id="now"></section>
+  <section id="ledger" hidden></section>
+  <section id="agents" hidden></section>
+  <section id="runs" hidden></section>
+</main>
+
+<dialog id="thread">
+  <div class="dlg-head">
+    <strong id="threadTitle"></strong>
+    <span class="grow"></span>
+    <button class="plain" onclick="document.getElementById('thread').close()">Close</button>
+  </div>
+  <div class="dlg-body" id="threadBody"></div>
+</dialog>
+
+<script>
+const TOKEN = new URLSearchParams(location.search).get('t') || '';
+const $ = (id) => document.getElementById(id);
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+function when(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+  if (days >= 1) return days + 'd ago';
+  const hrs = Math.floor((Date.now() - d.getTime()) / 3600000);
+  return hrs >= 1 ? hrs + 'h ago' : 'just now';
+}
+
+async function api(path, params) {
+  const u = new URL(path, location.origin);
+  u.searchParams.set('t', TOKEN);
+  for (const [k, v] of Object.entries(params || {})) u.searchParams.set(k, v);
+  const res = await fetch(u);
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+  return res.json();
+}
+
+// The verdict union lives in dispatch/sweep.ts. Only one value means an artefact
+// actually appeared; 'ran-nothing' is the common failure and reads green nowhere.
+function verdictClass(v) {
+  if (v === 'worked') return 'ok';
+  if (v === 'ran-nothing' || v === 'produced-invalid') return 'warn';
+  return 'bad';
+}
+
+function chips(t) {
+  const out = [];
+  if (t.halted) out.push('<span class="chip bad">halted</span>');
+  else if (t.stale) out.push('<span class="chip warn">stale</span>');
+  if (t.open && t.canMoveNow) out.push('<span class="chip ok">can move now</span>');
+  else if (t.open) out.push('<span class="chip warn">nobody can move</span>');
+  if (!t.open) out.push('<span class="chip">closed</span>');
+  return out.join(' ');
+}
+
+function threadCard(t) {
+  const waiting = t.outstanding
+    .map((o) => o.id + ' &rarr; ' + esc(o.awaiting.join(', ')) + (o.blockedBy.length ? ' <span class="muted">(blocked by ' + o.blockedBy.join(', ') + ')</span>' : ''))
+    .join(' &middot; ');
+  return '<div class="card click" data-thread="' + t.rootId + '">'
+    + '<div class="row"><strong class="mono">' + t.rootId + '</strong> ' + chips(t)
+    + '<span class="grow"></span><span class="muted">' + when(t.lastTime) + ' &middot; ' + t.rowCount + ' rows</span></div>'
+    + '<div>' + esc(t.summary) + '</div>'
+    + (waiting ? '<div class="muted mono" style="margin-top:.35rem">' + waiting + '</div>' : '')
+    + '</div>';
+}
+
+function section(title, list, emptyText) {
+  if (!list.length) return '<h2>' + title + '</h2><div class="empty">' + emptyText + '</div>';
+  return '<h2>' + title + ' <span class="muted">(' + list.length + ')</span></h2>' + list.map(threadCard).join('');
+}
+
+/**
+ * One message, rendered whole.
+ *
+ * L3 puts the substance in the file and only an address label in the row, so a
+ * dashboard that shows rows alone shows the envelopes and never the letters. This is
+ * the letter — usually the report that closes a chain, and the thing you actually
+ * wanted when you asked what happened.
+ */
+function messageCard(m) {
+  return '<div class="card">'
+    + '<div class="row"><strong class="mono">' + esc(m.id) + '</strong>'
+    + '<span>' + esc(m.writer) + ' &rarr; ' + esc(m.to.join(', ')) + '</span>'
+    + '<span class="chip">' + esc(m.type) + '</span>'
+    + (m.outcome ? '<span class="chip ok">' + esc(m.outcome) + '</span>' : '')
+    + '<span class="grow"></span><span class="muted">' + when(m.time) + '</span></div>'
+    + '<div style="margin-top:.35rem"><strong>' + esc(m.summary) + '</strong></div>'
+    + (m.body ? '<pre class="msgbody">' + esc(m.body) + '</pre>' : '')
+    + '</div>';
+}
+
+async function renderNow(s) {
+  // refresh() normally supplies this; a direct call re-fetches so the function is
+  // still usable on its own.
+  if (!s) { s = await api('/api/status'); paintHeader(s); }
+
+  let html = '';
+  if (s.latest) {
+    html += '<h2>Last message' + (s.latest.to.indexOf('operator') >= 0 ? ' &mdash; to you' : '') + '</h2>';
+    html += messageCard(s.latest);
+  }
+  if (s.answer) {
+    html += '<h2>Most recent report to you</h2>' + messageCard(s.answer);
+  }
+
+  if (s.badLines) html += '<div class="banner">' + s.badLines + ' unparseable line(s) in the index.</div>';
+  html += section('Open threads', s.open, 'Nothing outstanding.');
+  html += section('Needs a decision', s.stale.concat(s.halted), 'Nothing stale or halted.');
+  html += section('Finished without reporting to you', s.unreported, 'Nothing finished unreported.');
+
+  html += '<h2>Waiting on</h2>';
+  html += s.awaiting.length
+    ? '<div class="card">' + s.awaiting.map((a) => '<div class="row"><strong>' + esc(a.who) + '</strong><span class="muted">'
+        + a.count + ' item(s), ' + a.movable + ' actionable now</span></div>').join('') + '</div>'
+    : '<div class="empty">Nobody is waiting on anything.</div>';
+
+  html += '<h2>Recent decisions</h2>';
+  html += s.decisions.length
+    ? '<div class="card">' + s.decisions.map((d) => '<div class="row"><span class="mono">' + d.id + '</span><span>'
+        + esc(d.summary) + '</span><span class="grow"></span><span class="muted">' + esc(d.writer) + '</span></div>').join('') + '</div>'
+    : '<div class="empty">No decision rows yet.</div>';
+
+  html += '<p class="muted">' + s.rowCount + ' rows &middot; participants: ' + esc(s.participants.join(', ') || 'none') + '</p>';
+  $('now').innerHTML = html;
+}
+
+async function renderLedger() {
+  const l = await api('/api/ledger');
+  const rows = l.rows.slice().reverse();
+  $('ledger').innerHTML = '<h2>Index <span class="muted">(' + l.rows.length + ' rows, newest first)</span></h2>'
+    + '<div class="scroll"><table><thead><tr><th>ID</th><th>When</th><th>From</th><th>To</th><th>Type</th><th>Reply to</th><th>Outcome</th><th>Summary</th></tr></thead><tbody>'
+    + rows.map((r) => '<tr data-thread="' + r.id + '"><td class="mono">' + r.id + '</td><td class="muted">' + when(r.time)
+      + '</td><td>' + esc(r.writer) + '</td><td>' + esc(r.to.join(', ')) + '</td><td>' + esc(r.type)
+      + '</td><td class="mono">' + (r.replyTo || '') + '</td><td>' + esc(r.outcome || '') + '</td><td>' + esc(r.summary) + '</td></tr>').join('')
+    + '</tbody></table></div>';
+}
+
+// The roster, kept so the compose form can offer it rather than trusting typing.
+// A name the roster does not hold appends a row that is never dispatched, so the
+// only reliable fix is not being able to type one.
+let roster = [];
+
+function paintRoster() {
+  const sel = $('fTo');
+  const keep = sel.value;
+  sel.innerHTML = roster.length
+    ? roster.map(function (g) {
+        return '<option value="' + esc(g.name) + '"' + (g.dispatchExcluded ? ' disabled' : '') + '>'
+          + esc(g.name) + (g.dispatchExcluded ? ' (dispatch excluded)' : '')
+          + (g.description ? ' — ' + esc(g.description) : '') + '</option>';
+      }).join('')
+    : '<option value="">no agents registered</option>';
+  if (keep) sel.value = keep;
+
+  $('fAlso').innerHTML = roster.map(function (g) {
+    return '<label style="display:inline-flex;gap:.3rem;align-items:center;margin:0 .8rem .2rem 0;font-size:.85rem;color:var(--ink)">'
+      + '<input type="checkbox" class="also" value="' + esc(g.name) + '" style="width:auto"> ' + esc(g.name) + '</label>';
+  }).join('') || '<span class="muted">—</span>';
+}
+
+async function renderAgents() {
+  const a = await api('/api/agents');
+  $('commsRoot').textContent = a.commsRoot;
+  roster = a.agents;
+  paintRoster();
+  $('agents').innerHTML = '<h2>Roster <span class="muted">(' + a.agents.length + ')</span></h2>'
+    + (a.agents.length ? a.agents.map((g) => {
+        const flags = [];
+        if (g.dispatchExcluded) flags.push('<span class="chip warn">dispatch excluded</span>');
+        if (g.shellAllowed) flags.push('<span class="chip bad">shell allowed</span>');
+        if (g.allowMcp) flags.push('<span class="chip bad">mcp</span>');
+        if (g.allowSubagents) flags.push('<span class="chip bad">subagents</span>');
+        if (!g.hooksAudited) flags.push('<span class="chip warn">hooks unaudited</span>');
+        else if (g.hasPermissionHooks) flags.push('<span class="chip warn">has hooks</span>');
+        flags.push(g.protocolOk ? '<span class="chip ok">protocol ' + esc(g.protocolVersion || '') + '</span>' : '<span class="chip bad">protocol missing</span>');
+        flags.push(g.skillsOk ? '<span class="chip ok">skills</span>' : '<span class="chip bad">skills missing</span>');
+        return '<div class="card"><div class="row"><strong>' + esc(g.name) + '</strong>' + flags.join(' ') + '</div>'
+          + '<div class="muted mono">' + esc(g.home) + '</div>'
+          + (g.description ? '<div>' + esc(g.description) + '</div>' : '')
+          + (g.readPaths.length ? '<div class="muted">reads: ' + esc(g.readPaths.join(', ')) + '</div>' : '')
+          + (g.otherSkills.length ? '<div class="muted">own skills, untouched: ' + esc(g.otherSkills.join(', ')) + '</div>' : '')
+          + '</div>';
+      }).join('') : '<div class="empty">No agents registered. Use <span class="mono">orchestrator agent add</span>.</div>')
+    + '<p class="muted mono">' + esc(a.configFile) + '</p>';
+}
+
+async function renderRuns() {
+  const l = await api('/api/log');
+  $('runs').innerHTML = '<h2>Invocations <span class="muted">(' + l.total + ' total, newest first)</span></h2>'
+    + (l.entries.length ? '<div class="scroll"><table><thead><tr><th>When</th><th>Agent</th><th>Row</th><th>Verdict</th><th>Cost</th><th>Wall</th><th>Denials</th></tr></thead><tbody>'
+        + l.entries.map((e) => '<tr><td class="muted">' + when(e.startedAt) + '</td><td>' + esc(e.agent)
+          + (e.dryRun ? ' <span class="chip">dry run</span>' : '')
+          + '</td><td class="mono">' + esc((e.rowIds || []).join(' ')) + '</td><td>'
+          + '<span class="chip ' + verdictClass(e.verdict) + '">' + esc(e.verdict) + '</span>'
+          + '<div class="muted">' + esc(e.verdictWhy || '') + '</div></td><td>'
+          + (e.costUsd != null ? '$' + Number(e.costUsd).toFixed(3) : '') + '</td><td>'
+          + (e.wallMs != null ? Math.round(e.wallMs / 1000) + 's' : '') + '</td><td class="muted">'
+          + esc((e.denials || []).join(', ')) + '</td></tr>').join('')
+        + '</tbody></table></div>'
+      : '<div class="empty">Nothing has been invoked yet.</div>');
+}
+
+async function openThread(id) {
+  const t = await api('/api/thread', { id });
+  $('threadTitle').textContent = 'Thread ' + t.rootId + ' — ' + t.summary;
+  $('threadBody').innerHTML = t.rows.map((r) => '<div class="msg">'
+    + '<div class="row"><strong class="mono">' + r.id + '</strong><span>' + esc(r.writer) + ' &rarr; ' + esc(r.to.join(', '))
+    + '</span><span class="chip">' + esc(r.type) + '</span>'
+    + (r.outcome ? '<span class="chip">' + esc(r.outcome) + '</span>' : '')
+    + (r.replyTo ? '<span class="muted mono">replying to ' + r.replyTo + '</span>' : '')
+    + '<span class="grow"></span><span class="muted">' + when(r.time) + '</span></div>'
+    + '<div>' + esc(r.summary) + '</div>'
+    + (r.body ? '<pre>' + esc(r.body) + '</pre>' : '<div class="empty">No message file.</div>')
+    + '</div>').join('');
+  $('thread').showModal();
+}
+
+const RENDER = { now: renderNow, ledger: renderLedger, agents: renderAgents, runs: renderRuns };
+let current = 'now';
+
+// Each panel is fetched and rendered on its own. They used to share a try block with
+// renderAgents() first, so anything that call threw meant the tab actually asked for
+// was never rendered — one failing endpoint blanked the whole dashboard.
+async function refresh() {
+  const problems = [];
+  let s = null;
+  try { s = await api('/api/status'); paintHeader(s); } catch (err) { problems.push(err.message); }
+  try { await renderAgents(); } catch (err) { problems.push(err.message); }
+  try { await RENDER[current](s); } catch (err) { problems.push(err.message); }
+  $('error').innerHTML = problems.length
+    ? '<div class="banner">' + problems.map(esc).join('<br>') + '</div>'
+    : '';
+}
+
+/**
+ * The header reads the same status payload the Now tab does, so the quota and the
+ * kill switch are current on every tab rather than only the one that fetched them.
+ */
+function paintHeader(s) {
+  killed = s.killed;
+  paintKill();
+  $('killState').innerHTML = s.killed
+    ? '<span class="chip bad">kill switch set</span>'
+    : '<span class="chip ok">running</span>';
+  $('quota').innerHTML = quotaChip(s.quota);
+}
+
+/**
+ * What the CLI last reported about the quota. Shown, never enforced — the decision
+ * not to start a long chain at 89% is the operator's, and V5 forbids us predicting
+ * availability from our own arithmetic. The timestamp is part of the chip because a
+ * figure from an hour ago is a different claim from one from a minute ago.
+ */
+function quotaChip(q) {
+  if (!q) return '';
+  const pct = q.utilization != null ? Math.round(q.utilization * 100) + '% used' : null;
+  const cls = q.status === 'rejected' ? 'bad' : (q.status === 'allowed_warning' ? 'warn' : '');
+  const label = q.status === 'rejected'
+    ? 'quota exhausted'
+    : (pct || (q.status === 'allowed' ? 'quota ok' : esc(q.status)));
+  const resets = q.resetsAt && (q.status === 'rejected' || q.status === 'allowed_warning')
+    ? ' &middot; resets ' + esc(clock(q.resetsAt))
+    : '';
+  return '<span class="chip ' + cls + '" title="' + esc(q.limitType || '') + ' limit, as of ' + esc(q.at) + '">'
+    + esc(label) + resets + '</span>';
+}
+
+function clock(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? iso : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+document.querySelectorAll('nav button').forEach((b) => {
+  b.addEventListener('click', () => {
+    current = b.dataset.tab;
+    document.querySelectorAll('nav button').forEach((x) => x.setAttribute('aria-selected', String(x === b)));
+    ['now', 'ledger', 'agents', 'runs'].forEach((id) => { $(id).hidden = id !== current; });
+    // The starter, the compose form and the run console belong to Now. Leaving them
+    // on every tab pushed the other sections below the fold once a run console opened,
+    // which read as the tab not opening at all.
+    $('nowControls').hidden = current !== 'now';
+    window.scrollTo(0, 0);
+    refresh();
+  });
+});
+
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-thread]');
+  if (el) openThread(el.dataset.thread).catch((err) => alert(err.message));
+});
+
+$('refresh').addEventListener('click', refresh);
+
+// ---------------------------------------------------------------- starting work
+
+async function post(path, body) {
+  const u = new URL(path, location.origin);
+  u.searchParams.set('t', TOKEN);
+  const res = await fetch(u, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    // 409 is the writer lock: something else holds the ledger, and the message
+    // already says who and how to clear it.
+    const err = new Error(data.error || res.statusText);
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
+let source = null;
+let running = false;
+
+function setBusy(on) {
+  running = on;
+  // The console lives on the Now tab, so the header says a run is going while you
+  // are reading the ledger.
+  $('runState').innerHTML = on ? '<span class="chip ok">run in progress</span>' : '';
+  $('btnPending').disabled = on;
+  $('btnSend').disabled = on;
+  $('btnCompose').disabled = on;
+  $('consoleTitle').className = on ? 'live' : '';
+}
+
+function appendLine(text) {
+  const box = $('consoleLines');
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  box.textContent += (box.textContent ? String.fromCharCode(10) : '') + text;
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+function showOutcomes(outcomes, cost) {
+  $('consoleCost').textContent = cost != null ? 'estimated $' + Number(cost).toFixed(3) : '';
+  if (!outcomes || !outcomes.length) {
+    $('consoleOutcomes').innerHTML = '<div class="empty">Nothing was dispatched.</div>';
+    return;
+  }
+  $('consoleOutcomes').innerHTML = '<div class="scroll"><table><thead><tr><th>Agent</th><th>Rows</th>'
+    + '<th>Verdict</th><th>Cost</th><th>Produced</th></tr></thead><tbody>'
+    + outcomes.map(function (o) {
+        var verdict = o.skipped ? 'skipped' : (o.verdict || '');
+        var why = o.skipped ? (o.skipReason || '') : (o.verdictWhy || '');
+        if (o.stopChain) why += (why ? ' — ' : '') + 'chain stopped: ' + (o.stopReason || '');
+        return '<tr><td>' + esc(o.agent) + '</td><td class="mono">' + esc((o.rowIds || []).join(' '))
+          + '</td><td><span class="chip ' + (o.skipped ? '' : verdictClass(verdict)) + '">' + esc(verdict)
+          + '</span><div class="muted">' + esc(why) + '</div></td><td>'
+          + (o.costUsd != null ? '$' + Number(o.costUsd).toFixed(3) : '') + '</td><td>'
+          + o.produced + (o.rejected ? ' (' + o.rejected + ' rejected)' : '') + '</td></tr>';
+      }).join('')
+    + '</tbody></table></div>';
+}
+
+function openStream() {
+  if (source) source.close();
+  source = new EventSource('/api/run/stream?t=' + encodeURIComponent(TOKEN));
+  source.onmessage = function (e) {
+    const ev = JSON.parse(e.data);
+    if (ev.type === 'log') appendLine(ev.text);
+    else if (ev.type === 'idle') { source.close(); source = null; setBusy(false); }
+    else if (ev.type === 'done') {
+      showOutcomes(ev.outcomes, ev.costUsd);
+      appendLine('— finished —');
+      source.close(); source = null; setBusy(false); refresh();
+    } else if (ev.type === 'error') {
+      appendLine('— failed: ' + ev.error + ' —');
+      source.close(); source = null; setBusy(false); refresh();
+    }
+  };
+  source.onerror = function () {
+    // EventSource retries by itself; the server replays the transcript on reconnect.
+    if (source && source.readyState === EventSource.CLOSED) { source = null; setBusy(false); }
+  };
+}
+
+async function beginRun(sweep) {
+  $('console').hidden = false;
+  $('consoleLines').textContent = '';
+  $('consoleOutcomes').innerHTML = '';
+  $('consoleCost').textContent = '';
+  $('consoleTitle').textContent = sweep ? 'Picking up pending work' : 'Running';
+  setBusy(true);
+  try {
+    await post('/api/run', { sweep: sweep });
+    openStream();
+  } catch (err) {
+    setBusy(false);
+    appendLine(err.message);
+  }
+}
+
+$('btnPending').addEventListener('click', function () { beginRun(true); });
+$('btnCompose').addEventListener('click', function () {
+  $('compose').hidden = !$('compose').hidden;
+  if (!$('compose').hidden) $('fTo').focus();
+});
+$('btnCancel').addEventListener('click', function () { $('compose').hidden = true; });
+$('btnHideConsole').addEventListener('click', function () { $('console').hidden = true; });
+
+function composeBody() {
+  // The extra names go into the body as a sentence the agent reads, not into `to`.
+  // `to` is who is asked; this is who they may ask.
+  const also = [].slice.call(document.querySelectorAll('.also:checked'))
+    .map(function (c) { return c.value; })
+    .filter(function (n) { return n !== $('fTo').value; });
+  let body = $('fBody').value;
+  if (also.length) {
+    body += (body ? String.fromCharCode(10, 10) : '')
+      + 'Likely also needed: ' + also.join(', ')
+      + '. They are on the roster and you can address them directly.';
+  }
+  return {
+    to: $('fTo').value,
+    type: $('fType').value,
+    summary: $('fSummary').value,
+    body: body,
+    replyTo: $('fReplyTo').value || null,
+    needs: $('fNeeds').value,
+    hopBudget: $('fHops').value || null,
+    invocationCeiling: $('fCeiling').value || null,
+  };
+}
+
+async function writeThen(run) {
+  try {
+    const out = await post('/api/write', composeBody());
+    $('compose').hidden = true;
+    $('fSummary').value = ''; $('fBody').value = ''; $('fReplyTo').value = '';
+    await refresh();
+    if (run) await beginRun(false);
+    else {
+      $('console').hidden = false;
+      $('consoleTitle').textContent = 'Written';
+      $('consoleLines').textContent = 'Appended ' + out.row.id + '  ' + out.row.summary;
+      $('consoleOutcomes').innerHTML = '<div class="muted">Nothing has been dispatched. '
+        + 'Use <strong>Pick up pending work</strong> when you want it to run.</div>';
+    }
+  } catch (err) {
+    $('error').innerHTML = '<div class="banner">' + esc(err.message) + '</div>';
+  }
+}
+
+$('compose').addEventListener('submit', function (e) { e.preventDefault(); writeThen(true); });
+$('btnWriteOnly').addEventListener('click', function () { writeThen(false); });
+
+// ---------------------------------------------------------------- kill switch
+
+let killed = false;
+function paintKill() {
+  $('btnKill').textContent = killed ? 'Clear the stop' : 'Stop everything';
+  $('btnKill').classList.toggle('danger', !killed);
+}
+$('btnKill').addEventListener('click', async function () {
+  try {
+    if (killed) await post('/api/resume', {});
+    else await post('/api/stop', { reason: 'stopped from the dashboard' });
+    await refresh();
+  } catch (err) {
+    $('error').innerHTML = '<div class="banner">' + esc(err.message) + '</div>';
+  }
+});
+
+// A run already in progress — from a reload, or another tab — is adopted rather
+// than hidden, so the console is never a lie about what the server is doing.
+(async function adopt() {
+  try {
+    const r = await api('/api/run');
+    if (r.run && !r.run.done) {
+      $('console').hidden = false;
+      $('consoleTitle').textContent = r.run.who;
+      $('consoleLines').textContent = r.run.lines.join(String.fromCharCode(10));
+      setBusy(true);
+      openStream();
+    }
+  } catch (err) { /* the dashboard still works without it */ }
+})();
+
+refresh();
+</script>
+</body>
+</html>
