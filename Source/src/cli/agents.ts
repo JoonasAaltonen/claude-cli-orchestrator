@@ -12,116 +12,70 @@
  * that file is the agent, and it belongs to whoever wrote it.
  */
 import path from 'node:path';
-import { promises as fsp } from 'node:fs';
 import process from 'node:process';
-import { loadConfig } from '../config/load.js';
 import type { Config } from '../config/load.js';
 import { writeAgentSettings } from '../dispatch/invoke.js';
 import { buildPermissionPlan } from '../dispatch/permissions.js';
-import { canonical, isWithin, longPathWarning } from '../util/paths.js';
-import { ensureDir, exists, readTextIfExists, writeText } from '../util/fsx.js';
-import { repoRoot } from '../config/load.js';
+import { canonical } from '../util/paths.js';
+import { addAgent, removeAgent, RosterError, GRANT_CATALOGUE, GRANT_FIELDS } from '../roster/edit.js';
+import type { GrantField } from '../roster/edit.js';
+import { ensureDir } from '../util/fsx.js';
 import { bold, dim, green, red, yellow, heading } from './render.js';
 
 import { installProtocol, protocolStatus, readTemplate, PROTOCOL_REL } from './protocol.js';
 import { installSkills, skillStatus, skillRel, SKILL_COMMAND, NOTE_SKILL_COMMAND } from './skills.js';
-
-/** Rewrites the config file in place, preserving anything this command does not own. */
-async function mutateConfig(
-  configFile: string,
-  fn: (raw: any) => void
-): Promise<void> {
-  const text = await readTextIfExists(configFile);
-  if (text === null) throw new Error(`No configuration at ${configFile}. Run \`orchestrator init\` first.`);
-  const raw = JSON.parse(text);
-  raw.agents = raw.agents ?? [];
-  fn(raw);
-  await writeText(configFile, JSON.stringify(raw, null, 2) + '\n');
-}
 
 export interface AddOptions {
   name: string;
   home: string;
   description?: string;
   model?: string;
-  dispatchExcluded?: boolean;
-  shellAllowed?: boolean;
-  allowMcp?: boolean;
-  allowSubagents?: boolean;
+  /** The boolean grants, whatever GRANT_CATALOGUE currently describes. */
+  grants?: Partial<Record<GrantField, boolean>>;
   readPaths?: string[];
+  writePaths?: string[];
+  tools?: string[];
   /** Append the protocol block to the agent's CLAUDE.md rather than only reporting. */
   writeProtocol?: boolean;
 }
 
 export async function runAgentAdd(config: Config, opts: AddOptions): Promise<number> {
   const home = canonical(opts.home);
-  const repo = repoRoot();
-
-  // P4 / T2 — the same boundaries loadConfig enforces, checked here so the failure
-  // arrives while the operator is looking at it rather than on the next command.
-  if (isWithin(repo, home) || isWithin(home, repo)) {
-    console.error(red(`Refusing: ${home} overlaps the orchestrator's own directory. It is not an agent (P4).`));
-    return 2;
-  }
-  if (isWithin(home, config.commsRoot) || isWithin(config.commsRoot, home)) {
-    console.error(red(`Refusing: ${home} overlaps the comms root. The ledger is a channel, not an agent home (L4).`));
-    return 2;
-  }
-  for (const other of config.agents) {
-    if (other.name.toLowerCase() === opts.name.toLowerCase()) {
-      console.error(red(`An agent named "${opts.name}" is already in the roster. Remove it first, or pick another name.`));
-      return 2;
-    }
-    if (isWithin(other.home, home) || isWithin(home, other.home)) {
-      console.error(red(`Refusing: ${home} nests with "${other.name}" (${other.home}). Write scoping is per agent and nesting makes it unenforceable (X4).`));
-      return 2;
-    }
-  }
-
-  if (!(await exists(home))) {
-    console.error(red(`No such directory: ${home}`));
-    console.error(dim('  This tool registers agent directories that already exist; it does not create them.'));
-    return 2;
-  }
-  const stat = await fsp.stat(home);
-  if (!stat.isDirectory()) {
-    console.error(red(`Not a directory: ${home}`));
-    return 2;
-  }
 
   console.log(heading(`Registering ${opts.name}`));
   console.log(`  home   ${bold(home)}`);
 
-  const lp = longPathWarning(home, 60);
-  if (lp) console.log(`  ${yellow('warning')} ${lp}`);
-
-  // X5 — each agent *is* its instruction file. Registering a directory without one
-  // is allowed but is almost certainly a mistake, so it is said plainly.
-  const claudeMd = path.join(home, 'CLAUDE.md');
-  const claudeMdText = await readTextIfExists(claudeMd);
-  if (claudeMdText === null) {
-    console.log(`  ${yellow('warning')} no CLAUDE.md here. Without one this agent is a generic assistant wearing its name (X5).`);
-  }
-
-  await mutateConfig(config.configFile, (raw) => {
-    raw.agents.push({
+  // Every rule that decides whether this is allowed lives in roster/edit.ts, which
+  // the dashboard calls too. A second copy here is how a nesting rule ends up
+  // enforced on one front-end and not the other — and a nesting rule that does not
+  // hold is a write boundary that silently does not exist (X4).
+  let change;
+  try {
+    change = await addAgent(config, {
       name: opts.name,
       home,
       description: opts.description ?? '',
       ...(opts.model ? { model: opts.model } : {}),
-      hasPermissionHooks: null,
-      hooksAuditedAt: null,
-      dispatchExcluded: !!opts.dispatchExcluded,
-      shellAllowed: !!opts.shellAllowed,
-      allowMcp: !!opts.allowMcp,
-      allowSubagents: !!opts.allowSubagents,
-      readPaths: (opts.readPaths ?? []).map((p) => canonical(p)),
+      ...(opts.grants ?? {}),
+      paths: [
+        ...(opts.readPaths ?? []).map((p) => ({ path: p, read: true, write: false })),
+        ...(opts.writePaths ?? []).map((p) => ({ path: p, read: true, write: true })),
+      ],
+      ...(opts.tools ? { tools: opts.tools } : {}),
     });
-  });
+  } catch (err) {
+    if (err instanceof RosterError) {
+      console.error(red(err.message));
+      for (const d of err.details) console.error(red('  ' + d));
+      return 2;
+    }
+    throw err;
+  }
 
-  // Reload so the new agent is a first-class roster entry before we generate for it.
-  const updated = await loadConfig(config.configFile);
-  const agent = updated.agents.find((a) => a.name === opts.name)!;
+  for (const w of change.warnings) console.log(`  ${yellow('warning')} ${w}`);
+
+  const updated = change.config;
+  const agent = change.agent;
 
   // The only two things this tool writes into an agent's home, both of which it owns.
   await ensureDir(agent.outbox);
@@ -234,11 +188,12 @@ export async function runAgentList(config: Config): Promise<number> {
     return 0;
   }
   for (const a of config.agents) {
-    const flags: string[] = [];
-    if (a.dispatchExcluded) flags.push(yellow('dispatch-excluded'));
-    if (a.shellAllowed) flags.push(red('shell allowed'));
-    if (a.allowMcp) flags.push(red('mcp'));
-    if (a.allowSubagents) flags.push(red('subagents'));
+    // Whatever is not at its default, in the catalogue's own words — the same set
+    // the dashboard chips, from the same place.
+    const flags: string[] = GRANT_FIELDS.filter((f) => a[f] !== GRANT_CATALOGUE[f].fallback).map((f) => {
+      const chip = GRANT_CATALOGUE[f].chip;
+      return chip.tone === 'bad' ? red(chip.label) : chip.tone === 'warn' ? yellow(chip.label) : chip.label;
+    });
     if (a.hasPermissionHooks === null) flags.push(yellow('hooks unaudited'));
     else if (a.hasPermissionHooks) flags.push(yellow('has hooks'));
 
@@ -255,7 +210,10 @@ export async function runAgentList(config: Config): Promise<number> {
     } else {
       console.log(dim(`     protocol ${status.fileVersion ?? 'installed'}`));
     }
-    if (a.readPaths.length) console.log(dim(`     reads: ${a.readPaths.join(', ')}`));
+    for (const p of a.paths) {
+      const how = p.write ? 'read+write' : 'read only';
+      console.log(dim(`     ${how}: ${p.path}`));
+    }
     if (a.model) console.log(dim(`     model: ${a.model}`));
   }
   return 0;
@@ -267,9 +225,7 @@ export async function runAgentRemove(config: Config, name: string): Promise<numb
     console.error(red(`"${name}" is not in the roster.`));
     return 2;
   }
-  await mutateConfig(config.configFile, (raw) => {
-    raw.agents = raw.agents.filter((a: any) => String(a.name).toLowerCase() !== name.toLowerCase());
-  });
+  await removeAgent(config, name);
   console.log(`${green('removed')} ${agent.name} from ${config.configFile}`);
   console.log(dim(`  ${agent.home} was not touched. Its outbox and generated settings file are still there.`));
   console.log(dim('  Ledger rows it already wrote stay in the index — nothing is ever edited (L1).'));

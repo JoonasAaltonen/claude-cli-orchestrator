@@ -72,8 +72,57 @@ export const agentSchema = z.object({
    */
   allowSubagents: z.boolean().default(false),
 
-  /** X4 — reads are scoped to whatever document store this agent needs. */
+  /**
+   * Directories outside this agent's home that it may reach, and what it may do
+   * there.
+   *
+   * One entry per directory with two flags, rather than a read list and a write
+   * list, because a directory an agent both reads and writes would otherwise have to
+   * be typed twice and kept in step by hand. The two lists could disagree; one entry
+   * with two checkboxes cannot.
+   */
+  paths: z
+    .array(
+      z.object({
+        path: z.string().min(1),
+        read: z.boolean().default(true),
+        write: z.boolean().default(false),
+      })
+    )
+    .default([]),
+
+  /**
+   * The shape this used to be: read-only document stores, one string each.
+   *
+   * Still accepted, and folded into `paths` on load as read-without-write, which is
+   * exactly what it meant. Kept rather than migrated because a configuration file is
+   * the operator's, and a tool that silently rewrites one is a tool you cannot leave
+   * a comment in.
+   */
   readPaths: z.array(z.string()).default([]),
+
+  /**
+   * May this agent write anywhere in its own home, or only into its outbox?
+   *
+   * L5 gives every agent exactly one outbox and that is where the *message* goes.
+   * It says nothing about the agent's ordinary work, and the default here — outbox
+   * only — turned out to mean an agent could not save the document it was asked to
+   * produce into the directory it lives in. That failure is invisible from the
+   * prompt: the agent tries, is denied, and writes an apology into its message.
+   *
+   * So it is on by default. The argument for off was that a home-wide grant is the
+   * operator's call rather than a default they discover; the argument that beat it
+   * is that an agent which cannot write in its own directory cannot do the work it
+   * was registered to do, and the operator discovers *that* instead — later, from an
+   * apology in a message. An agent confined to its outbox is the special case, and
+   * `--no-home-writable` is how it is asked for.
+   *
+   * The X3 deny rules for `.claude/settings.json`, `.mcp.json` and the generated
+   * files still apply on top — deny beats allow — so this widens the working area
+   * without opening the self-grant paths. That is what makes the default safe to
+   * turn on: the paths by which an agent could grant itself more stay shut.
+   */
+  homeWritable: z.boolean().default(true),
 
   /** Built-in tools this agent may use. Denials in permissions.ts still apply on top. */
   tools: z.array(z.string()).default([...DEFAULT_TOOLS]),

@@ -477,3 +477,58 @@ test('an agent-started chain closes without anyone reporting to the operator', (
   const toOperator = AGENT_STARTED.filter((r) => r.to.includes('operator'));
   assert.deepEqual(toOperator, [], 'which is exactly why /ledger-note warns about it');
 });
+
+/**
+ * `information` — a fact handed to an agent for its own notes.
+ *
+ * The type would be inert without this: dispatch reads `awaitingBy` and nothing
+ * else, so a type that never becomes outstanding is never delivered, and the row
+ * sits in the ledger unread by the one party it was addressed to.
+ */
+const INFORMATION = rows(
+  '0001 ; 2026-08-21T09:00:00Z ; operator ; worker ; information ;  ;  ;  ; messages\\0001-a.md ; The Q3 source moved to the finance share'
+);
+
+test('an information row is delivered to its addressee', () => {
+  const f = fold(INFORMATION, SETTINGS);
+  const forWorker = awaiting(f, 'worker');
+  assert.deepEqual(forWorker.map((o) => o.row.id), ['0001']);
+  assert.equal(forWorker[0]!.reason, 'unread-information');
+  assert.deepEqual(forWorker[0]!.blockedBy, [], 'nothing to wait for — it can act at once');
+  assert.equal(f.openThreads.length, 1);
+});
+
+test('any reply from the addressee closes an information row', () => {
+  // A report, not a response: there is no outcome to state, because nothing was
+  // asked. M1 would refuse an outcome on a report anyway.
+  const f = fold(
+    INFORMATION.concat(
+      rows(
+        '0002 ; 2026-08-21T09:40:00Z ; worker ; operator ; report ; 0001 ;  ;  ; messages\\0002-b.md ; Noted in notes.md under sources'
+      )
+    ),
+    SETTINGS
+  );
+  assert.deepEqual(awaiting(f, 'worker'), [], 'it must not come back a second time');
+  assert.equal(f.openThreads.length, 0, 'and the thread is over');
+});
+
+test('an information row addressed to several agents waits on each of them separately', () => {
+  const f = fold(
+    rows(
+      '0001 ; 2026-08-21T09:00:00Z ; operator ; worker+coordinator ; information ;  ;  ;  ; messages\\0001-a.md ; The Q3 source moved',
+      '0002 ; 2026-08-21T09:40:00Z ; worker ; operator ; report ; 0001 ;  ;  ; messages\\0002-b.md ; Noted'
+    ),
+    SETTINGS
+  );
+  assert.deepEqual(awaiting(f, 'worker'), [], 'the one who acknowledged is done');
+  assert.deepEqual(awaiting(f, 'coordinator').map((o) => o.row.id), ['0001'], 'the other is not');
+});
+
+test('an information row is not a decision and stays out of the digest', () => {
+  // Both are facts worth keeping, and the digest goes to everyone. An information
+  // row is addressed to someone in particular, so it must not leak into every cold
+  // prompt in the system.
+  const f = fold(INFORMATION, SETTINGS);
+  assert.deepEqual(f.decisions, []);
+});

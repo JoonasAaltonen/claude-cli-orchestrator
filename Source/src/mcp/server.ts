@@ -44,7 +44,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { loadConfig, findAgent } from '../config/load.js';
 import type { Agent, Config } from '../config/load.js';
-import { MESSAGE_TYPES, OUTCOMES } from '../ledger/row.js';
+import { MESSAGE_TYPES, MESSAGE_TYPE_INFO, OUTCOMES } from '../ledger/row.js';
 import { parseMessageText, renderMessageFile } from '../ledger/message.js';
 import type { MessageDraft } from '../ledger/message.js';
 import { readIndex } from '../ledger/store.js';
@@ -88,13 +88,16 @@ const TOOL_SCHEMA = {
       type: {
         type: 'string',
         enum: [...MESSAGE_TYPES],
-        description: [
-          'request  — you are asking someone else to do work',
-          'response — you are answering a request addressed to you (needs replyTo and outcome)',
-          'report   — you are stating something without asking for anything',
-          'signoff  — you are approving or rejecting someone else\'s work (needs replyTo and outcome)',
-          'decision — you are recording a decision that was made',
-        ].join('\n'),
+        // Generated from the one description of each type. Hand-written copies of
+        // this list went stale the first time a type was added.
+        description: MESSAGE_TYPES.map((t) => {
+          const info = MESSAGE_TYPE_INFO[t];
+          const needs = [
+            info.replyTo === 'required' ? 'replyTo' : null,
+            info.outcome === 'required' ? 'outcome' : null,
+          ].filter(Boolean);
+          return `${t} — ${info.what}${needs.length ? ` (needs ${needs.join(' and ')})` : ''}`;
+        }).join('\n'),
       },
       replyTo: {
         type: 'string',

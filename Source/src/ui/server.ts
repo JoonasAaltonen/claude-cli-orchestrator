@@ -21,10 +21,22 @@ import { appRoot } from '../config/load.js';
 import type { Config } from '../config/load.js';
 import { readTextIfExists } from '../util/fsx.js';
 import { tokenMatches } from './token.js';
-import { agentsPayload, ledgerPayload, logPayload, statusPayload, threadPayload } from './api.js';
-import { BadRequest, clearKillSwitch, dispatchAgent, setKillSwitch, writeRow } from './actions.js';
+import { agentsPayload, ledgerPayload, logPayload, metaPayload, statusPayload, threadPayload } from './api.js';
+import {
+  BadRequest,
+  addRosterAgent,
+  clearKillSwitch,
+  dispatchAgent,
+  installContractFor,
+  removeRosterAgent,
+  setKillSwitch,
+  updateRosterAgent,
+  writeRow,
+} from './actions.js';
 import { currentRun, runSnapshot, startRun, subscribe } from './runner.js';
+import { listDirectory } from './fsbrowse.js';
 import { WriterLockHeld } from '../ledger/lock.js';
+import { logProblem } from '../log/problems.js';
 
 export function pagePath(): string {
   return path.join(appRoot(), 'templates', 'ui', 'index.html');
@@ -42,7 +54,24 @@ function hostAllowed(host: string | undefined): boolean {
   return name === 'localhost' || name === '127.0.0.1' || name === '::1';
 }
 
+/**
+ * What a failing response said, kept until the response finishes.
+ *
+ * Logging from inside `send` would report a status before the response is actually
+ * out, and logging from every error branch means one branch will eventually be
+ * added without it. One hook on `finish` covers all of them — including the 404 and
+ * the 405, which no branch would have bothered to log — and this map is only how the
+ * message gets from the branch to the hook.
+ */
+const failureNote = new WeakMap<http.ServerResponse, { what?: string; detail?: string }>();
+
+function noteFailure(res: http.ServerResponse, patch: { what?: string; detail?: string }): void {
+  failureNote.set(res, { ...failureNote.get(res), ...patch });
+}
+
 function send(res: http.ServerResponse, status: number, body: string, type: string): void {
+  if (status >= 400) noteFailure(res, { what: firstOf(body) });
+
   res.writeHead(status, {
     'content-type': type,
     'cache-control': 'no-store',
@@ -59,16 +88,64 @@ function sendJson(res: http.ServerResponse, status: number, value: unknown): voi
   send(res, status, JSON.stringify(value), 'application/json; charset=utf-8');
 }
 
+/** An error body reads better in a log as its message than as its JSON. */
+function firstOf(body: string): string {
+  if (body.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(body) as { error?: unknown };
+      if (typeof parsed.error === 'string') return parsed.error;
+    } catch {
+      /* not JSON after all — the raw text is the message */
+    }
+  }
+  return body;
+}
+
 export interface UiServer {
   url: string;
   port: number;
   close: () => Promise<void>;
 }
 
+/**
+ * The configuration the handlers see, in a box.
+ *
+ * A box rather than a closed-over value, because the dashboard can now edit the
+ * roster and the edit has to be visible to the next request. A box rather than a
+ * module-level variable, because that would be shared by every server started in one
+ * process — fine for the single dashboard `orchestrator ui` runs, wrong the moment
+ * anything starts two.
+ *
+ * `loadConfig` is where the cross-checks and the derived paths live, so every edit
+ * replaces `config` wholesale with what came back from disk — never a field patched
+ * in place.
+ */
+interface Live {
+  config: Config;
+}
+
 export async function startUiServer(config: Config, token: string, port: number): Promise<UiServer> {
+  const live: Live = { config };
   const server = http.createServer((req, res) => {
-    void handle(config, token, req, res).catch((err: unknown) => {
-      // A failed read is worth seeing on screen rather than as a dead panel.
+    // Every response that fails is reported once, here, when it is actually sent.
+    // The dashboard shows the operator one line beside a button; this is the copy
+    // that reaches the terminal and the log, with the stack the page never sees.
+    res.once('finish', () => {
+      if (res.statusCode < 400) return;
+      const note = failureNote.get(res) ?? {};
+      logProblem({
+        source: 'server',
+        what: note.what ?? `${res.statusCode}`,
+        where: `${req.method ?? '?'} ${(req.url ?? '/').split('?')[0]}`,
+        status: res.statusCode,
+        detail: note.detail ?? null,
+      });
+    });
+
+    void handle(live, token, req, res).catch((err: unknown) => {
+      // A failed read is worth seeing on screen rather than as a dead panel — and
+      // the stack is kept here because this is the only place it exists.
+      noteFailure(res, { detail: err instanceof Error ? (err.stack ?? null) ?? undefined : undefined });
       sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
     });
   });
@@ -89,8 +166,35 @@ export async function startUiServer(config: Config, token: string, port: number)
   };
 }
 
+/**
+ * A ceiling on browser reports, because the reporter is a loop away from being the
+ * problem: one thrown error inside a render that runs on a timer would otherwise
+ * append to the log forever. Sixty a minute is far more than a person generates and
+ * far less than a loop does.
+ */
+const CLIENT_ERROR_LIMIT = 60;
+let clientErrorWindow = { startedAt: 0, count: 0 };
+
+function clientErrorsAllowed(): boolean {
+  const now = Date.now();
+  if (now - clientErrorWindow.startedAt > 60_000) clientErrorWindow = { startedAt: now, count: 0 };
+  clientErrorWindow.count += 1;
+  if (clientErrorWindow.count === CLIENT_ERROR_LIMIT + 1) {
+    logProblem({
+      source: 'server',
+      what: `The dashboard reported more than ${CLIENT_ERROR_LIMIT} errors in a minute — the rest of this minute is not logged.`,
+      where: 'POST /api/client-error',
+    });
+  }
+  return clientErrorWindow.count <= CLIENT_ERROR_LIMIT;
+}
+
+function str(v: unknown): string | null {
+  return typeof v === 'string' && v.trim() ? v : null;
+}
+
 async function handle(
-  config: Config,
+  live: Live,
   token: string,
   req: http.IncomingMessage,
   res: http.ServerResponse
@@ -100,6 +204,7 @@ async function handle(
     return;
   }
 
+  const config = live.config;
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
   const supplied = url.searchParams.get('t') ?? headerToken(req);
   if (!tokenMatches(token, supplied ?? undefined)) {
@@ -113,7 +218,7 @@ async function handle(
   }
 
   if (req.method === 'POST') {
-    await handlePost(config, url, req, res);
+    await handlePost(live, url, req, res);
     return;
   }
   if (req.method !== 'GET') {
@@ -141,6 +246,17 @@ async function handle(
     case '/api/agents':
       sendJson(res, 200, await agentsPayload(config));
       return;
+    // The vocabulary the page builds its menus from. Static for the life of the
+    // process — it is derived from constants — so it is fetched once and kept.
+    case '/api/meta':
+      sendJson(res, 200, metaPayload());
+      return;
+    case '/api/fs': {
+      // A picker, not a file browser: directory names only, never contents.
+      const at = url.searchParams.get('path');
+      sendJson(res, 200, await listDirectory(at && at.trim() ? at : null));
+      return;
+    }
     case '/api/log':
       sendJson(res, 200, await logPayload(config));
       return;
@@ -253,14 +369,30 @@ function streamRun(res: http.ServerResponse): void {
   res.on('finish', () => clearInterval(beat));
 }
 
+/**
+ * Roster edits are refused mid-run.
+ *
+ * Not for the config file's sake — that write is atomic enough. It is that
+ * `buildPermissionPlan` runs per dispatch from the roster, so a change landing
+ * between two dispatches in one loop would give the second half of a chain different
+ * boundaries from the first, with nothing in the ledger saying so.
+ */
+function requireIdle(what: string): void {
+  const session = currentRun();
+  if (session && !session.done) {
+    throw new BadRequest(`A run is in progress. Wait for it to finish, or stop it, before you ${what} — an agent's boundaries are computed per dispatch and would change underneath it.`);
+  }
+}
+
 async function handlePost(
-  config: Config,
+  live: Live,
   url: URL,
   req: http.IncomingMessage,
   res: http.ServerResponse
 ): Promise<void> {
   try {
     const body = await readJsonBody(req);
+    const config = live.config;
 
     switch (url.pathname) {
       case '/api/write': {
@@ -280,6 +412,26 @@ async function handlePost(
         sendJson(res, 200, { outcome });
         return;
       }
+      // The page's own failures, reported by the page. This is the half that was
+      // missing: a TypeError in the dashboard never reached the server at all, so
+      // the only trace of it was one line of red text beside a button and whatever
+      // the operator happened to have devtools open for.
+      case '/api/client-error': {
+        if (clientErrorsAllowed()) {
+          logProblem({
+            source: 'browser',
+            what: String((body as Record<string, unknown>).what ?? 'unknown error'),
+            where: str((body as Record<string, unknown>).where),
+            status: null,
+            detail: str((body as Record<string, unknown>).detail),
+          });
+        }
+        // Always 204, even when throttled. A page that gets an error back from
+        // reporting an error is a page that reports it again.
+        res.writeHead(204, { 'cache-control': 'no-store' });
+        res.end();
+        return;
+      }
       case '/api/stop': {
         const file = await setKillSwitch(config, String(body.reason ?? ''));
         sendJson(res, 200, { killed: true, file });
@@ -288,6 +440,40 @@ async function handlePost(
       case '/api/resume': {
         const file = await clearKillSwitch(config);
         sendJson(res, 200, { killed: false, file });
+        return;
+      }
+
+      // ---- the roster -----------------------------------------------------
+      //
+      // Each of these replaces `live` with the config that came back from disk, so
+      // the next request sees the edit. The guard is shared: an agent's write
+      // scoping is computed at dispatch from the roster, and editing the roster
+      // while a run is in flight would mean a plan built from one configuration and
+      // an agent already running under another.
+      case '/api/agents/add': {
+        requireIdle('add an agent');
+        const { config: next, agent, warnings, installed } = await addRosterAgent(config, body);
+        live.config = next;
+        sendJson(res, 200, { agent: agent.name, home: agent.home, outbox: agent.outbox, warnings, installed });
+        return;
+      }
+      case '/api/agents/update': {
+        requireIdle('change an agent');
+        const { config: next, agent } = await updateRosterAgent(config, body);
+        live.config = next;
+        sendJson(res, 200, { agent: agent.name });
+        return;
+      }
+      case '/api/agents/remove': {
+        requireIdle('remove an agent');
+        const { config: next, removed } = await removeRosterAgent(config, body);
+        live.config = next;
+        sendJson(res, 200, { removed: removed.name, home: removed.home });
+        return;
+      }
+      case '/api/agents/install': {
+        const installed = await installContractFor(config, body);
+        sendJson(res, 200, installed);
         return;
       }
       default:
@@ -303,6 +489,7 @@ async function handlePost(
       sendJson(res, 409, { error: err.message, holder: err.info, lockFile: err.file });
       return;
     }
+    noteFailure(res, { detail: err instanceof Error ? err.stack ?? undefined : undefined });
     sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
   }
 }

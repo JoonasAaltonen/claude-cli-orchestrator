@@ -29,7 +29,12 @@ import { readInvocationLog } from '../log/invocations.js';
 import { runDoctor } from './doctor.js';
 import { runInit } from './init.js';
 import { runUi } from './ui.js';
+import { readProblems, problemLogPath } from '../log/problems.js';
 import { runAgentAdd, runAgentList, runAgentRemove, runAgentProtocol, runAgentSkills } from './agents.js';
+import { DEFAULT_TOOLS } from '../config/schema.js';
+import { GRANT_CATALOGUE, GRANT_FIELDS } from '../roster/edit.js';
+import type { GrantField } from '../roster/edit.js';
+import { NETWORK_TOOLS } from '../dispatch/permissions.js';
 import { runProbe } from './probe.js';
 import { runProbeSlash } from './probe-slash.js';
 import { runProbeContract } from './probe-contract.js';
@@ -83,34 +88,76 @@ program
     });
   });
 
+/**
+ * The tool set for `agent add`/`agent set`.
+ *
+ * `--web` exists because the two network tools are the ones people actually reach
+ * for and naming both by hand is easy to half-do. Adding to the default rather than
+ * replacing it: someone passing --web means "and the web", not "only the web".
+ */
+function toolSet(opts: { tool?: string[]; web?: boolean }): string[] | undefined {
+  if (!opts.tool && !opts.web) return undefined;
+  const chosen = new Set(opts.tool ?? [...DEFAULT_TOOLS]);
+  if (opts.web) for (const t of NETWORK_TOOLS) chosen.add(t);
+  return [...chosen];
+}
+
 // The roster. This tool ships no agents — `add` registers a directory that already
 // exists rather than creating one, which is the direction P1 actually reads in.
 const agentCmd = program.command('agent').description('Manage the roster of agent directories');
 
-agentCmd
-  .command('add')
-  .description('Register an existing agent directory')
-  .argument('<name>', 'roster name, also the Writer on every row it produces')
-  .requiredOption('--home <dir>', 'the directory the agent lives in — its CLAUDE.md is loaded from here')
-  .option('--description <text>', 'for your benefit; never shown to agents')
-  .option('--model <model>', 'per-agent model override')
-  .option('--dispatch-excluded', 'P2 — set this for any directory you work in interactively')
-  .option('--shell-allowed', 'X2 — makes its file boundaries advisory, and denies skill-write (X3a)')
-  .option('--allow-mcp', 'X3 — .mcp.json entries start processes without an approval step')
-  .option('--allow-subagents', 'X3 — subagent definitions carry their own tool grants')
-  .option('--read-path <dir...>', 'X4 — directories it may read but never write')
-  .option('--write-protocol', 'install the protocol file, a one-line CLAUDE.md pointer, and the ledger skills')
-  .action(async (name: string, opts) => {
+/**
+ * The boolean grants, as command-line flags, from the same catalogue the dashboard
+ * renders its checkboxes from. Registering them by hand here is how `agent add`
+ * comes to offer a different set of boundaries from the roster page — two front-ends
+ * disagreeing about what an agent is allowed to do, which is the one disagreement
+ * this application cannot afford (X4).
+ */
+function withGrantOptions(cmd: Command): Command {
+  for (const field of GRANT_FIELDS) {
+    const { cli } = GRANT_CATALOGUE[field];
+    cmd.option(cli.flag, cli.help);
+  }
+  return cmd;
+}
+
+/**
+ * And reading them back. Commander gives a `--no-x` flag a default of `true` and
+ * leaves a plain flag `undefined`, so anything it did not set falls to the
+ * catalogue's own default rather than to `false`.
+ */
+function grantsFrom(opts: Record<string, unknown>): Partial<Record<GrantField, boolean>> {
+  const out: Partial<Record<GrantField, boolean>> = {};
+  for (const field of GRANT_FIELDS) {
+    const v = opts[field];
+    out[field] = typeof v === 'boolean' ? v : GRANT_CATALOGUE[field].fallback;
+  }
+  return out;
+}
+
+withGrantOptions(
+  agentCmd
+    .command('add')
+    .description('Register an existing agent directory')
+    .argument('<name>', 'roster name, also the Writer on every row it produces')
+    .requiredOption('--home <dir>', 'the directory the agent lives in — its CLAUDE.md is loaded from here')
+    .option('--description <text>', 'for your benefit; never shown to agents')
+    .option('--model <model>', 'per-agent model override')
+    .option('--read-path <dir...>', 'directories outside its home it may read but never write')
+    .option('--write-path <dir...>', 'directories outside its home it may read and write')
+    .option('--tool <name...>', `built-in tools it may use (default: ${DEFAULT_TOOLS.join(', ')})`)
+    .option('--web', 'shorthand for --tool WebSearch --tool WebFetch, added to whatever else is set')
+    .option('--write-protocol', 'install the protocol file, a one-line CLAUDE.md pointer, and the ledger skills')
+).action(async (name: string, opts) => {
     process.exitCode = await runAgentAdd(await cfg(), {
       name,
       home: opts.home,
       description: opts.description,
       model: opts.model,
-      dispatchExcluded: !!opts.dispatchExcluded,
-      shellAllowed: !!opts.shellAllowed,
-      allowMcp: !!opts.allowMcp,
-      allowSubagents: !!opts.allowSubagents,
+      grants: grantsFrom(opts),
       readPaths: opts.readPath ?? [],
+      writePaths: opts.writePath ?? [],
+      tools: toolSet(opts),
       writeProtocol: !!opts.writeProtocol,
     });
   });
@@ -586,12 +633,39 @@ program
   .option('--port <n>', 'override ports.operatorView', (v) => Number.parseInt(v, 10))
   .option('--open', 'launch a browser at it, so a shortcut needs no URL')
   .option('--new-token', 'mint a fresh token; every existing bookmark stops working')
+  .option('--log-file <file>', 'append failures here instead of state/problems.jsonl')
   .action(async (opts) => {
     process.exitCode = await runUi(await cfg(), {
       port: opts.port,
       open: !!opts.open,
       newToken: !!opts.newToken,
+      logFile: opts.logFile ?? null,
     });
+  });
+
+program
+  .command('problems')
+  .description('Failures recorded by the dashboard and the server — both sides, newest last')
+  .option('-n, --limit <n>', 'how many to show', (v) => Number.parseInt(v, 10), 30)
+  .option('--browser', 'only what the page reported')
+  .option('--server', 'only what the server reported')
+  .option('--file <path>', 'read a log written with `ui --log-file` instead of the default')
+  .action(async (opts) => {
+    const config = await cfg();
+    let all = await readProblems(config, opts.file ?? null);
+    if (opts.browser) all = all.filter((p) => p.source === 'browser');
+    if (opts.server) all = all.filter((p) => p.source === 'server');
+    console.log(heading(`Problems — ${all.length} recorded, showing up to ${opts.limit}`));
+    if (!all.length) {
+      console.log(dim(`  None in ${opts.file ?? problemLogPath(config)}.`));
+      return;
+    }
+    for (const p of all.slice(-opts.limit)) {
+      const tag = p.source === 'browser' ? yellow('browser') : red('server ');
+      console.log(`  ${dim(p.at.slice(0, 19).replace('T', ' '))}  ${tag}  ${p.what}`);
+      if (p.where || p.status) console.log(dim(`      ${[p.where, p.status].filter(Boolean).join('  ')}`));
+      if (p.detail) for (const line of p.detail.split('\n').slice(0, 12)) console.log(dim('      ' + line));
+    }
   });
 
 function printOutcome(o: DispatchOutcome, _dryRun: boolean): void {
@@ -603,7 +677,11 @@ function printOutcome(o: DispatchOutcome, _dryRun: boolean): void {
     console.log(`\n${bold('argv')}`);
     console.log('  ' + p.argv.map(quoteForDisplay).join(' \\\n  '));
     console.log(`\n${bold('boundaries')}`);
-    for (const r of p.permissions.rationale) console.log(`  · ${r}`);
+    // Both halves here. This output is read while working on the application
+    // itself, which is the one place the requirement identifiers earn their space.
+    for (const r of p.permissions.rationale) {
+      console.log(`  · ${r.what}${r.requirement ? ' ' + dim('[' + r.requirement + ']') : ''}`);
+    }
     console.log(`\n${bold('deny rules')}`);
     for (const d of p.permissions.settings.permissions.deny) console.log(`  ${red('deny')}  ${d}`);
     console.log(`\n${bold('prompt')} ${dim(`(${p.prompt.length} characters, delivered on stdin)`)}`);

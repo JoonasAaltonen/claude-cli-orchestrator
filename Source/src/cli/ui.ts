@@ -10,12 +10,15 @@ import { spawn } from 'node:child_process';
 import type { Config } from '../config/load.js';
 import { ensureToken, tokenPath } from '../ui/token.js';
 import { startUiServer } from '../ui/server.js';
+import { startProblemLog } from '../log/problems.js';
 import { bold, dim, green, heading, red, yellow } from './render.js';
 
 export interface UiOptions {
   port?: number;
   open?: boolean;
   newToken?: boolean;
+  /** Where failures are appended. Defaults to state/problems.jsonl under the comms root. */
+  logFile?: string | null;
 }
 
 /** Best-effort browser launch. A failure here is a note, never a fatal. */
@@ -37,6 +40,9 @@ export async function runUi(config: Config, opts: UiOptions): Promise<number> {
   const { token, created, file } = await ensureToken(config, !!opts.newToken);
   const port = opts.port ?? config.ports.operatorView;
 
+  // Before the server exists, so a failure to bind is itself recorded.
+  const problemLog = startProblemLog(config, opts.logFile ?? null);
+
   let server;
   try {
     server = await startUiServer(config, token, port);
@@ -52,6 +58,7 @@ export async function runUi(config: Config, opts: UiOptions): Promise<number> {
   console.log(heading('Operator dashboard'));
   console.log(`  ${bold(server.url)}`);
   console.log(dim(`  bound to ${config.ports.bindAddress}:${server.port} — loopback only, not reachable from the network`));
+  console.log(dim(`  errors print here and append to ${problemLog}`));
 
   if (created) {
     console.log(`\n  ${green(opts.newToken ? 'rotated' : 'created')} ${file}`);

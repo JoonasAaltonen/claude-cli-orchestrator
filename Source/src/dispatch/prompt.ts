@@ -61,7 +61,7 @@ export async function buildPrompt(config: Config, inputs: PromptInputs): Promise
 
   const threads = uniqueThreads(f, pending);
   const threadBlock = await buildThreadBlock(config, agent, threads);
-  const pendingBlock = buildPendingBlock(config, pending);
+  const pendingBlock = buildPendingBlock(config, agent, pending);
   const decisionsBlock = buildDecisionsBlock(config, f);
 
   // A hint, not a rule: the frontmatter example in the template is more useful when
@@ -142,9 +142,11 @@ function buildDeliveryBlock(
     'You supply the fields listed below; the orchestrator writes the file and assigns',
     'the ID, the timestamp and your name. You cannot supply those and should not try.',
     '',
-    'Call it **once**, when the work is finished. If a field is wrong the call comes',
-    'back with the specific reason and you can correct it and call again immediately —',
-    'that costs nothing, so there is no reason to guess.',
+    'Call it once per message. Usually that is one call, at the end. It is more than',
+    'one when you are delegating: a call for each agent you are asking, and — only if',
+    'you can answer now — a call answering what was asked of you. If a field is wrong',
+    'the call comes back with the specific reason and you can correct it and call again',
+    'immediately — that costs nothing, so there is no reason to guess.',
     '',
     `If \`${MCP_TOOL_ID}\` is not in your tool list, the connection failed. Fall back to`,
     'writing the file yourself:',
@@ -155,15 +157,16 @@ function buildDeliveryBlock(
 
 function fileDeliveryBlock(agent: Agent, replyToHint: string, replyToIdHint: string): string {
   return [
-    '**The file is the deliverable.** Write exactly one Markdown file into your outbox:',
+    '**The file is the deliverable.** Write one Markdown file per message, into your outbox:',
     '',
     '```',
     agent.outbox,
     '```',
     '',
     'Pick any filename ending in `.md`. The orchestrator sweeps that directory when you',
-    'exit, validates what it finds, and appends a ledger row for it. It is YAML',
-    'frontmatter followed by your message:',
+    'exit, validates what it finds, and appends a ledger row for each. Usually you write',
+    'one. You write several when you are delegating — one per agent you are asking. Each',
+    'is YAML frontmatter followed by your message:',
     '',
     '```markdown',
     '---',
@@ -185,7 +188,7 @@ function fileDeliveryBlock(agent: Agent, replyToHint: string, replyToIdHint: str
  * thread block above, and an agent that wants the whole thing should be able to
  * open it rather than guess.
  */
-function buildPendingBlock(config: Config, pending: Outstanding[]): string {
+function buildPendingBlock(config: Config, agent: Agent, pending: Outstanding[]): string {
   if (!pending.length) {
     return '_Nothing is waiting on you. If that is unexpected, say so in your reply and write no file._';
   }
@@ -195,14 +198,39 @@ function buildPendingBlock(config: Config, pending: Outstanding[]): string {
     const why =
       p.reason === 'awaiting-signoff'
         ? 'your sign-off is required (`needs`)'
-        : 'you have not answered this request';
+        : p.reason === 'unread-information'
+          ? 'this was sent to you to keep, and you have not acknowledged it'
+          : 'you have not answered this request';
     lines.push(`### ${r.id} — from **${r.writer}** (${r.type})`);
     lines.push('');
     lines.push(`> ${r.summary}`);
     lines.push('');
     lines.push(`- Why it is on you: ${why}`);
     if (r.ref) lines.push(`- Full message: \`${refTo(config.commsRoot, r.ref)}\``);
-    lines.push(`- Answer it with \`replyTo: ${r.id}\``);
+    if (p.reason === 'unread-information') {
+      // Nobody is waiting on work here, so the instruction has to say what "done"
+      // is. Without it a cold agent reads an unanswered row addressed to it and
+      // does the only thing the rest of this prompt describes: work it like a
+      // request.
+      // Whether it can keep the fact at all is a permission question, and telling an
+      // agent to write a file its own settings deny is how a run ends in a refusal
+      // loop rather than a note.
+      lines.push(
+        agent.homeWritable
+          ? '- **No work is being asked of you.** Decide whether this is worth keeping. If it is,'
+              + ' write it into your own notes yourself — in your home directory, wherever you keep'
+              + ' such things — in your own words, with enough context to be usable cold.'
+          : '- **No work is being asked of you**, and you cannot write anywhere except your outbox,'
+              + ' so you cannot file this yourself. If it is worth keeping, say so in your'
+              + ' acknowledgement and quote the part that matters, so the operator can place it.'
+      );
+      lines.push(
+        `- Then acknowledge it: one \`report\` with \`replyTo: ${r.id}\`, saying in a line whether`
+          + ' you recorded it and where. That is what closes it; until then it comes back to you.'
+      );
+    } else {
+      lines.push(`- Answer it with \`replyTo: ${r.id}\``);
+    }
     lines.push('');
   }
   return lines.join('\n').trimEnd();

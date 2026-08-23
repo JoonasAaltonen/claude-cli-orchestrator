@@ -76,15 +76,66 @@ export const SKILL_PATHS = ['.claude/skills/**', '.claude/commands/**'] as const
 const WRITE_TOOLS = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'] as const;
 
 /**
- * Permission-rule path syntax. Claude Code takes an absolute path as `//` followed
- * by the path with forward slashes; on Windows that is `//C:/YourDirectory/...`. Rules use
- * forward slashes regardless of platform, which is a rule *format*, not stored
- * state, so T5 is untouched — canonical native form is what we hold in memory and
- * write to the index.
+ * Tools that leave the machine. Neither is in the default set, and both need an
+ * explicit allow rule as well as a place in `--tools` — see the comment at the point
+ * they are granted, which records what happens when only one of the two is done.
+ */
+export const NETWORK_TOOLS = ['WebSearch', 'WebFetch'] as const;
+
+/**
+ * Permission-rule path syntax: the absolute path, forward slashes, nothing in front.
+ *
+ * It used to emit a `//` prefix, on the belief that this is how Claude Code spells an
+ * absolute rule. **Measured on 2.1.239, Windows, and the result is worth stating
+ * plainly: a `//`-prefixed rule matches nothing at all.** Three spellings of the same
+ * grant were given to a live agent, one directory each, and the disk was checked
+ * rather than the agent's report:
+ *
+ *     Write(//C:/…/doubleSlash/**)     nothing written
+ *     Write(../../forms/relative/**)   nothing written
+ *     Write(C:/…/bareAbsolute/**)      written
+ *
+ * Then the same question for denials, because that is the direction that matters. A
+ * directory allowed by the bare form and denied by the `//` form was **written to**;
+ * a directory allowed and denied by the bare form was not. So the prefix did not make
+ * a rule strict or lax — it made the rule inert.
+ *
+ * What that meant while it was wrong: the write denial on the comms root, and the one
+ * on read-only document stores, were both decoration. Nothing was exposed, because a
+ * write outside the agent's home is refused when *no* rule permits it and none did —
+ * but that is protection by accident, and this file's own header says an omission is
+ * not a boundary. The denials are real now.
+ *
+ * The self-grant denials were never affected: each is emitted twice, and the
+ * working-directory-relative twin (`.claude/settings.json`) is the one that matched.
+ *
+ * Rules use forward slashes on every platform. That is a rule *format*, not stored
+ * state — canonical native form is what is held in memory and written to the index.
  */
 export function rulePath(abs: string, suffix = ''): string {
   const forward = abs.replace(/\\/g, '/').replace(/\/+$/, '');
-  return `//${forward}${suffix}`;
+  return `${forward}${suffix}`;
+}
+
+/**
+ * One boundary, said twice.
+ *
+ * `what` is the whole explanation and stands on its own: it names the tool or the
+ * path, says what happens, and says why that is the safe answer. `requirement` is
+ * the internal spec identifier the rule came from. That is a cross-reference, not
+ * part of the explanation — useful to whoever maintains this application and
+ * meaningless to anybody else.
+ *
+ * Two fields rather than one string, because the two readers differ. The dashboard
+ * shows an operator what their checkboxes came to and sends `what` alone; the CLI's
+ * dry run is read while working on this application and prints both. Interpolated
+ * into a single sentence the identifier could only be removed by a regex over prose,
+ * which is how "skill-write is denied because X1 is relaxed" turns into
+ * "skill-write is denied because is relaxed".
+ */
+export interface Boundary {
+  what: string;
+  requirement: string | null;
 }
 
 export interface PermissionPlan {
@@ -105,28 +156,32 @@ export interface PermissionPlan {
   tools: string[];
   /** --add-dir */
   addDirs: string[];
-  /** Human-readable account of every boundary and the requirement behind it. */
-  rationale: string[];
+  /** An account of every boundary, in two halves — see `Boundary`. */
+  rationale: Boundary[];
 }
 
 export function buildPermissionPlan(config: Config, agent: Agent): PermissionPlan {
   const deny: string[] = [];
   const allow: string[] = [];
   const disallowedTools: string[] = [];
-  const rationale: string[] = [];
+  const rationale: Boundary[] = [];
+  const note = (requirement: string | null, what: string): void => {
+    rationale.push({ requirement, what });
+  };
 
   // ---- X1: shell -----------------------------------------------------------
   if (agent.shellAllowed) {
     // X2 — record it explicitly rather than pretending the path rules hold.
-    rationale.push(
-      `X2: shell is ALLOWED for "${agent.name}". Its file boundaries below are advisory and must be enforced somewhere else.`
+    note(
+      'X2',
+      `A shell is ALLOWED for "${agent.name}". Every path rule below is advisory as a result — a shell reaches whatever this account can reach — so those boundaries have to be enforced somewhere other than here.`
     );
   } else {
     for (const t of SHELL_TOOLS) {
       deny.push(t);
       disallowedTools.push(t);
     }
-    rationale.push(`X1: ${SHELL_TOOLS.join(', ')} denied — not omitted, denied.`);
+    note('X1', `${SHELL_TOOLS.join(', ')} are denied — not left out of a list, denied. A path-scoped write rule is worth nothing beside a shell.`);
   }
 
   // ---- X3: subagents -------------------------------------------------------
@@ -135,9 +190,9 @@ export function buildPermissionPlan(config: Config, agent: Agent): PermissionPla
       deny.push(t);
       disallowedTools.push(t);
     }
-    rationale.push('X3: subagent tools denied — subagent definitions carry tool grants this application cannot see.');
+    note('X3', 'Subagent tools are denied. A subagent definition carries its own tool grants, which this application cannot see into or restrict.');
   } else {
-    rationale.push(`X3: subagents are ALLOWED for "${agent.name}". Their tool grants are outside this application's permission model.`);
+    note('X3', `Subagents are ALLOWED for "${agent.name}". What they may do is decided by their own definitions, outside everything on this page.`);
   }
 
   // ---- X3: self-granted permissions ---------------------------------------
@@ -150,7 +205,7 @@ export function buildPermissionPlan(config: Config, agent: Agent): PermissionPla
       deny.push(`${tool}(${rulePath(agent.home, '/' + rel)})`);
     }
   }
-  rationale.push('X3: writes denied to settings.json, settings.local.json, .mcp.json and .claude/agents/ — each one executes, so a write there is a self-granted permission on the next invocation.');
+  note('X3', 'Writes are denied to settings.json, settings.local.json, .mcp.json and .claude/agents/. Each of those is read as configuration on the next invocation, so a write there would be this agent granting itself a permission.');
 
   // ---- X3a: skills, and the coupling that makes them safe ------------------
   if (agent.shellAllowed) {
@@ -160,16 +215,16 @@ export function buildPermissionPlan(config: Config, agent: Agent): PermissionPla
         deny.push(`${tool}(${rulePath(agent.home, '/' + rel)})`);
       }
     }
-    rationale.push('X3a: skill-write DENIED because X1 is relaxed for this agent. A skill instructing the agent to run a script is inert with nothing to run it; with a shell it is an escalation path. The two requirements hold each other up.');
+    note('X3a', 'Writing its own skills is DENIED, because this agent has a shell. A skill telling the agent to run a script is inert with nothing to run it; with a shell it becomes a way to escalate. The two settings hold each other up, which is why relaxing one closes the other.');
   } else {
-    rationale.push('X3a: skill-write permitted in this agent\'s own directory, and safe only because shell is denied above. D13 diffs it mechanically regardless (T8).');
+    note('X3a', 'Writing its own skills is permitted, inside its own directory. That is safe only because the shell is denied above; either way the skill files are diffed mechanically after every run.');
   }
 
   // ---- X3: MCP -------------------------------------------------------------
   if (!agent.allowMcp) {
-    rationale.push('X3: --strict-mcp-config, so the only MCP servers connected are the ones this application names. Non-interactive sessions otherwise connect .mcp.json servers in a directory never trusted.');
+    note('X3', 'The only MCP servers connected are the ones this application names. Left alone, a non-interactive session connects whatever the directory\'s own .mcp.json lists, with nothing asking first.');
   } else {
-    rationale.push(`X3: MCP is ALLOWED for "${agent.name}". .mcp.json entries in its own directory start processes without an approval step in non-interactive mode.`);
+    note('X3', `Its own MCP servers are ALLOWED for "${agent.name}". Entries in its .mcp.json start processes, and in a non-interactive run nothing asks first.`);
   }
 
   // The one MCP tool this application offers. Allowed by its fully-qualified name so
@@ -181,7 +236,7 @@ export function buildPermissionPlan(config: Config, agent: Agent): PermissionPla
   // `orchestrator probe-mcp` measures rather than assumes.
   if (config.contract.mcp) {
     allow.push(MCP_TOOL_ID);
-    rationale.push(`T6: ${MCP_TOOL_ID} allowed — the agent supplies fields and the application writes the message file, so there is no format for it to get wrong.`);
+    note('T6', `${MCP_TOOL_ID} is allowed. The agent supplies the fields and this application writes the message file, so there is no format for the agent to get wrong.`);
   }
 
   // ---- L5, X4, X6: where this agent may write -----------------------------
@@ -199,7 +254,56 @@ export function buildPermissionPlan(config: Config, agent: Agent): PermissionPla
     allow.push(`${t}(${outboxRel}/**)`);
     allow.push(`${t}(${rulePath(outbox, '/**')})`);
   }
-  rationale.push(`L5: one outbox, inside this agent's own home — ${outbox} (allowed as both "${outboxRel}/**" and the absolute form; the relative form is the one measured to match)`);
+  note('L5', `It delivers its messages into one outbox, inside its own home: ${outbox}`);
+
+  // ---- The agent's ordinary work, if the operator has allowed it --------------
+  //
+  // L5 is about where the *message* goes, and the outbox-only default was read as a
+  // statement about everything the agent writes. It is not, and the gap showed up as
+  // an agent asked to produce a document being unable to save one: `Write` to its own
+  // home was denied, and the only trace was an apology in the message it did manage
+  // to send.
+  //
+  // The deny rules above are emitted before this and are unconditional, so the
+  // self-grant paths stay shut — deny beats allow, and that ordering is what makes a
+  // home-wide grant safe to offer at all rather than a way to hand X3 back.
+  if (agent.homeWritable) {
+    for (const t of WRITE_TOOLS) {
+      allow.push(`${t}(**)`);
+      allow.push(`${t}(${rulePath(agent.home, '/**')})`);
+    }
+    note(
+      'X3',
+      `Writing is ALLOWED anywhere in its own home: ${agent.home}. The denials above still apply on top of this — a denial always beats a permission — so the settings files stay shut. Other agents' homes are outside this agent's workspace entirely.`
+    );
+  } else {
+    note(
+      'L5',
+      'Writing is confined to the outbox. This agent cannot save a working file in its own home — tick "anywhere in its own home directory" if its job is to produce documents there.'
+    );
+  }
+
+  // ---- The network tools, which need saying twice --------------------------
+  //
+  // *Measured on Claude Code 2.1.239:* WebSearch present in `--tools` and absent
+  // from `--allowed-tools` is **denied**, and the denial is silent from the prompt's
+  // side — the agent reports "no web search tool is available" and writes its answer
+  // from memory, which reads as an agent that chose not to look rather than one that
+  // was refused. That is the exact failure this file's header calls the worst kind.
+  //
+  // The reason is `--permission-mode dontAsk`: a tool with no allow rule needs a
+  // prompt, and there is nobody to answer it. Every other tool an agent uses is
+  // either path-scoped above or approved by workspace confinement; these two reach
+  // outside it and so have neither.
+  for (const t of NETWORK_TOOLS) {
+    if (agent.tools.includes(t)) {
+      allow.push(t);
+      note(
+        null,
+        `${t} is allowed. It reaches the network, so it has to be granted by name; without that it would sit in the agent's tool list looking available and be refused the moment it was used.`
+      );
+    }
+  }
 
   // ---- T6, L2: the comms root is readable, never writable ------------------
   // "Agents never write into the comms root; the application owns it entirely."
@@ -207,25 +311,48 @@ export function buildPermissionPlan(config: Config, agent: Agent): PermissionPla
     deny.push(`${tool}(${rulePath(config.commsRoot, '/**')})`);
   }
   allow.push(`Read(${rulePath(config.commsRoot, '/**')})`);
-  rationale.push('T6/L2: the comms root is readable and never writable. Only the application writes the ledger index.');
+  note('T6/L2', 'The ledger is readable and never writable. Only this application writes to it.');
 
-  // ---- X4: reads are scoped to whatever document store it needs ------------
-  for (const p of agent.readPaths) {
-    allow.push(`Read(${rulePath(p, '/**')})`);
-    for (const tool of WRITE_TOOLS) deny.push(`${tool}(${rulePath(p, '/**')})`);
+  // ---- X4: directories outside the home, and what may happen in them -------
+  //
+  // A directory the agent may write is granted; one it may only read is granted for
+  // reading and *denied* for writing. That denial is not redundant with the omission
+  // beside it: both directories are in the workspace, because they have to be for
+  // the agent to reach them at all, and inside the workspace an omission is only an
+  // omission. It is also the one place a wrong rule spelling would not show up —
+  // see `rulePath`, where exactly that was true until it was measured.
+  for (const p of agent.paths) {
+    // Write without read is not a thing the filesystem offers, and pretending
+    // otherwise would produce an agent that can overwrite a file it cannot open.
+    if (p.read || p.write) allow.push(`Read(${rulePath(p.path, '/**')})`);
+    for (const tool of WRITE_TOOLS) {
+      const rule = `${tool}(${rulePath(p.path, '/**')})`;
+      if (p.write) allow.push(rule);
+      else deny.push(rule);
+    }
   }
-  if (agent.readPaths.length) {
-    rationale.push(`X4: read-only document stores — ${agent.readPaths.join(', ')}`);
+  const readOnly = agent.paths.filter((p) => !p.write).map((p) => p.path);
+  const writable = agent.paths.filter((p) => p.write).map((p) => p.path);
+  if (readOnly.length) {
+    note('X4', `Outside its home it may read but never write: ${readOnly.join(', ')}`);
+  }
+  if (writable.length) {
+    note(
+      'X4',
+      `Outside its home it may read AND write: ${writable.join(', ')}. Nothing here is inside another agent's home unless you put it there, and this application does not check that for you.`
+    );
   }
 
   // ---- Layer 1: the workspace ---------------------------------------------
   // Every other agent's home is absent from this list, which is stronger than a
   // deny rule: file tools cannot address a path outside the workspace at all.
-  const addDirs = [config.commsRoot, ...agent.readPaths];
+  // Layer 1. A directory absent from here cannot be addressed by a file tool at
+  // all, whatever the rules say — which is why a read-only entry still appears.
+  const addDirs = [config.commsRoot, ...agent.paths.map((p) => p.path)];
 
   const others = config.agents.filter((a) => a.name !== agent.name);
   if (others.length) {
-    rationale.push(`L5/X4: ${others.length} other agent director${others.length === 1 ? 'y is' : 'ies are'} outside this agent's workspace entirely, not merely denied.`);
+    note('L5/X4', `${others.length} other agent director${others.length === 1 ? 'y is' : 'ies are'} outside this agent's workspace entirely — not denied by a rule, simply not addressable.`);
   }
 
   // ---- Layer 3: the built-in tool set -------------------------------------

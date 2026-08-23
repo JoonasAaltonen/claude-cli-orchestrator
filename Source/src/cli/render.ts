@@ -47,6 +47,7 @@ export function typeBadge(t: string): string {
     case 'report': return dim('report');
     case 'signoff': return green('signoff');
     case 'decision': return yellow('decision');
+    case 'information': return dim('information');
     default: return t;
   }
 }
@@ -140,7 +141,13 @@ export function renderInbox(who: string, items: Outstanding[], f: Fold): string 
     const t = f.threadOf.get(o.row.id);
     out.push(`  ${bold(o.row.id)} ${typeBadge(o.row.type)} ${dim('from')} ${o.row.writer}`);
     out.push(`     ${o.row.summary}`);
-    out.push(`     ${dim(o.reason === 'awaiting-signoff' ? 'your sign-off is required' : 'unanswered request')}${t ? dim(`  ·  thread ${t.rootId}, ${t.rows.length} row(s)`) : ''}`);
+    const why =
+      o.reason === 'awaiting-signoff'
+        ? 'your sign-off is required'
+        : o.reason === 'unread-information'
+          ? 'information to note, unacknowledged'
+          : 'unanswered request';
+    out.push(`     ${dim(why)}${t ? dim(`  ·  thread ${t.rootId}, ${t.rows.length} row(s)`) : ''}`);
     if (o.row.ref) out.push(`     ${dim(o.row.ref)}`);
     out.push('');
   }

@@ -116,7 +116,7 @@ export async function sweepOutbox(config: Config, agent: Agent): Promise<SweepRe
     if (draft.to.includes(agent.name)) {
       result.rejected.push(
         await bounce(config, agent, file, [
-          `to: you addressed this to yourself ("${agent.name}"). A row cannot be dispatched back to its own writer (D3). Address it to whoever should act on it.`,
+          `to: you addressed this to yourself ("${agent.name}"). A message is never delivered back to whoever wrote it. Address it to whoever should act on it.`,
         ])
       );
       continue;
@@ -222,18 +222,40 @@ function firstLine(errors: string[]): string {
  * classification, made from the artefact and the process outcome together, with the
  * artefact taking precedence in every case where they disagree.
  */
-export type InvocationVerdict =
+export const INVOCATION_VERDICTS = [
   /** 1. Worked — valid artefact present. */
-  | 'worked'
+  'worked',
   /** 2. Ran but produced nothing — clean exit, no artefact. The common case. */
-  | 'ran-nothing'
+  'ran-nothing',
   /** 3. Process failed — CLI-level fault. */
-  | 'process-failed'
+  'process-failed',
   /** Produced only rejects: it ran, wrote something, and the something was invalid. */
-  | 'produced-invalid'
-  | 'rate-limited'
-  | 'timed-out'
-  | 'killed';
+  'produced-invalid',
+  'rate-limited',
+  'timed-out',
+  'killed',
+] as const;
+
+export type InvocationVerdict = (typeof INVOCATION_VERDICTS)[number];
+
+/**
+ * How each verdict reads, for anything that shows one. A list rather than a type
+ * because the dashboard has to colour them, and a union it cannot enumerate becomes
+ * a hand-copied `if` chain that quietly stops covering every case — which is what it
+ * was before this.
+ *
+ * Only `worked` is good news. `ran-nothing` is the common failure and reads green
+ * nowhere.
+ */
+export const VERDICT_INFO: Readonly<Record<InvocationVerdict, { tone: 'ok' | 'warn' | 'bad'; what: string }>> = {
+  worked: { tone: 'ok', what: 'A valid message came out of it.' },
+  'ran-nothing': { tone: 'warn', what: 'It exited cleanly and wrote nothing.' },
+  'produced-invalid': { tone: 'warn', what: 'It wrote something and the something was refused.' },
+  'process-failed': { tone: 'bad', what: 'The CLI itself failed — the agent never got as far as the work.' },
+  'rate-limited': { tone: 'bad', what: 'The CLI reported a rate limit.' },
+  'timed-out': { tone: 'bad', what: 'It went quiet, or ran past its wall clock.' },
+  killed: { tone: 'bad', what: 'Stopped by the kill switch, or by you.' },
+};
 
 export function judge(
   processOutcome: string,
@@ -249,28 +271,28 @@ export function judge(
   }
 
   if (processOutcome === 'rate-limited') {
-    return { verdict: 'rate-limited', why: 'A rate limit was recognised in the event stream (V5).' };
+    return { verdict: 'rate-limited', why: 'The CLI reported a rate limit.' };
   }
   if (processOutcome === 'silence-timeout') {
     return {
       verdict: 'timed-out',
-      why: 'The process stopped producing output and never returned (V7). Killed by the silence timeout.',
+      why: 'The process stopped producing output and never returned. Killed by the silence timeout.',
     };
   }
   if (processOutcome === 'wall-timeout') {
     return { verdict: 'timed-out', why: 'The wall-clock timeout was reached.' };
   }
   if (processOutcome === 'killed') {
-    return { verdict: 'killed', why: 'Stopped by the kill switch or the operator (C3).' };
+    return { verdict: 'killed', why: 'Stopped by the kill switch, or by you.' };
   }
   if (processOutcome === 'process-failed') {
-    return { verdict: 'process-failed', why: 'A CLI-level fault (V3, outcome 3).' };
+    return { verdict: 'process-failed', why: 'The CLI itself failed — the agent never got as far as doing the work.' };
   }
 
   if (sweep.rejected.length) {
     return {
       verdict: 'produced-invalid',
-      why: `${sweep.rejected.length} file(s) failed validation and were bounced (M7). Nothing entered the ledger.`,
+      why: `${sweep.rejected.length} file(s) failed validation and were bounced back to the agent. Nothing entered the ledger.`,
     };
   }
 
@@ -278,6 +300,6 @@ export function judge(
   // requiring judgement." Note that every status field may have said success here.
   return {
     verdict: 'ran-nothing',
-    why: 'Clean exit, no artefact in the outbox. Note that the CLI may have reported success on every status field (V1) — the outbox is what decides.',
+    why: 'Clean exit, but nothing in the outbox. The CLI may well have reported success on every status field it has; what decides is whether a message file appeared.',
   };
 }

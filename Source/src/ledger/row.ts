@@ -39,14 +39,89 @@
  */
 import { z } from 'zod';
 
-export const MESSAGE_TYPES = ['report', 'request', 'response', 'signoff', 'decision'] as const;
+export const MESSAGE_TYPES = ['report', 'request', 'response', 'signoff', 'decision', 'information'] as const;
 export type MessageType = (typeof MESSAGE_TYPES)[number];
 
 export const OUTCOMES = ['done', 'deferred', 'rejected', 'blocked'] as const;
 export type Outcome = (typeof OUTCOMES)[number];
 
-/** M1: `Outcome` appears on `response` and `signoff` rows only. */
-export const OUTCOME_TYPES: ReadonlySet<string> = new Set(['response', 'signoff']);
+/**
+ * What each type is for, and what it obliges — one line per type, in one place.
+ *
+ * This is a `Record` keyed by `MessageType` rather than a list, and that is the
+ * whole point of it: adding a name to `MESSAGE_TYPES` without saying what it means
+ * does not compile. The dashboard's type menu, the MCP tool's field description and
+ * the rules below are all built from this, so a new type arrives in all three at
+ * once or not at all. Adding `information` cost five hand-edits in five files, which
+ * is the mistake this closes.
+ *
+ * Agent-facing prose in `templates/prompt/v1.md` is deliberately *not* generated
+ * from here. D8 makes that template a versioned interface an operator may rewrite;
+ * a generated block inside it would be overwritten or, worse, silently disagree.
+ * `doctor` cross-checks the two instead.
+ */
+export interface MessageTypeInfo {
+  /** One line, for whoever is choosing a type — an agent or the operator. */
+  what: string;
+  /** M1 — whether this type carries an Outcome. */
+  outcome: 'required' | 'forbidden';
+  /** Whether it must name the row it answers. */
+  replyTo: 'required' | 'optional';
+  /** Does a row of this type, addressed to an agent, cause that agent to be invoked? */
+  dispatched: boolean;
+}
+
+export const MESSAGE_TYPE_INFO: Readonly<Record<MessageType, MessageTypeInfo>> = {
+  request: {
+    what: 'Asking someone else to do work. Stays open until they answer.',
+    outcome: 'forbidden',
+    replyTo: 'optional',
+    dispatched: true,
+  },
+  response: {
+    what: 'Answering a request addressed to you.',
+    outcome: 'required',
+    replyTo: 'required',
+    dispatched: false,
+  },
+  report: {
+    what: 'Stating what happened. Closes nothing, expects no answer.',
+    outcome: 'forbidden',
+    replyTo: 'optional',
+    dispatched: false,
+  },
+  signoff: {
+    what: "Approving or rejecting someone else's work, where a `needs` field asked for it.",
+    outcome: 'required',
+    replyTo: 'required',
+    dispatched: false,
+  },
+  decision: {
+    what: 'Settling something future work should not re-open. Shown to every agent afterwards.',
+    outcome: 'forbidden',
+    replyTo: 'optional',
+    dispatched: false,
+  },
+  information: {
+    what: 'A fact worth keeping, for the recipient to record in their own notes.',
+    outcome: 'forbidden',
+    replyTo: 'optional',
+    dispatched: true,
+  },
+};
+
+/** M1: `Outcome` appears on `response` and `signoff` rows only. Derived, not restated. */
+export const OUTCOME_TYPES: ReadonlySet<string> = new Set(
+  MESSAGE_TYPES.filter((t) => MESSAGE_TYPE_INFO[t].outcome === 'required')
+);
+
+/** What each outcome claims. Shown beside the field wherever one is chosen. */
+export const OUTCOME_INFO: Readonly<Record<Outcome, string>> = {
+  done: 'The work is finished.',
+  deferred: 'Not now, and not refused — say in the body what it is waiting for.',
+  rejected: 'Refused. The body must state the specific change that would make it pass.',
+  blocked: 'Something stopped it. The body must say precisely what.',
+};
 
 /** Reserved participant names. Neither is an agent; neither is ever a dispatch target. */
 export const OPERATOR = 'operator';

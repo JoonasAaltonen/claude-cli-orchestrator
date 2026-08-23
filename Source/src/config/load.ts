@@ -16,6 +16,12 @@ import { canonical, isWithin, longPathWarning, pathKey, samePath } from '../util
 import { readTextIfExists } from '../util/fsx.js';
 import { OPERATOR, ORCHESTRATOR } from '../ledger/row.js';
 
+export interface AgentPath {
+  path: string;
+  read: boolean;
+  write: boolean;
+}
+
 export interface Agent {
   name: string;
   home: string;
@@ -28,7 +34,10 @@ export interface Agent {
   shellAllowed: boolean;
   allowMcp: boolean;
   allowSubagents: boolean;
-  readPaths: string[];
+  /** Directories outside its home that it may reach, and what it may do there. */
+  paths: AgentPath[];
+  /** May write anywhere in its own home, not only its outbox. */
+  homeWritable: boolean;
   tools: string[];
   silenceTimeoutMs: number | undefined;
   wallClockTimeoutMs: number | undefined;
@@ -137,6 +146,38 @@ export async function loadConfig(configFile?: string): Promise<Config> {
   return normalise(parsed.data, file);
 }
 
+/**
+ * One list of directories from the two the schema accepts.
+ *
+ * `readPaths` is the older spelling and means read-without-write, so it folds in as
+ * exactly that. Both are canonicalised here for T5's second consequence — two
+ * spellings of one directory would otherwise become two entries whose flags could
+ * disagree, and the one that lost the race would be the one enforced.
+ */
+function mergePaths(
+  paths: readonly { path: string; read: boolean; write: boolean }[],
+  readPaths: readonly string[],
+  base: string
+): AgentPath[] {
+  const byKey = new Map<string, AgentPath>();
+  const add = (p: string, read: boolean, write: boolean): void => {
+    const abs = canonical(p, base);
+    const existing = byKey.get(pathKey(abs));
+    // Two entries for one directory are merged permissively rather than one winning.
+    // The alternative is an operator ticking write on a path that is also in the
+    // legacy list and watching the tick do nothing.
+    byKey.set(pathKey(abs), {
+      path: abs,
+      read: read || existing?.read || false,
+      write: write || existing?.write || false,
+    });
+  };
+  for (const p of readPaths) add(p, true, false);
+  for (const p of paths) add(p.path, p.read, p.write);
+  // An entry granting neither is not a boundary, it is a line in a config file.
+  return [...byKey.values()].filter((p) => p.read || p.write);
+}
+
 function normalise(c: ReturnType<typeof configSchema.parse>, file: string): Config {
   const warnings: string[] = [];
   const root = repoRoot();
@@ -157,7 +198,8 @@ function normalise(c: ReturnType<typeof configSchema.parse>, file: string): Conf
       shellAllowed: a.shellAllowed,
       allowMcp: a.allowMcp,
       allowSubagents: a.allowSubagents,
-      readPaths: a.readPaths.map((p) => canonical(p, base)),
+      paths: mergePaths(a.paths, a.readPaths, base),
+      homeWritable: a.homeWritable,
       tools: a.tools,
       silenceTimeoutMs: a.silenceTimeoutMs,
       wallClockTimeoutMs: a.wallClockTimeoutMs,

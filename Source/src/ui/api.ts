@@ -19,6 +19,10 @@ import type { Config } from '../config/load.js';
 import { protocolStatus } from '../cli/protocol.js';
 import { skillStatus } from '../cli/skills.js';
 import { readInvocationLog } from '../log/invocations.js';
+import { buildPermissionPlan } from '../dispatch/permissions.js';
+import { TOOL_CATALOGUE, TOOL_GROUPS, GRANT_CATALOGUE, GRANT_FIELDS } from '../roster/edit.js';
+import { MESSAGE_TYPES, MESSAGE_TYPE_INFO, OUTCOMES, OUTCOME_INFO } from '../ledger/row.js';
+import { INVOCATION_VERDICTS, VERDICT_INFO } from '../dispatch/sweep.js';
 import type { InvocationLogEntry } from '../log/invocations.js';
 import { exists } from '../util/fsx.js';
 import { layout } from '../ledger/store.js';
@@ -215,11 +219,29 @@ export async function agentsPayload(config: Config) {
       home: a.home,
       description: a.description,
       model: a.model ?? config.defaults.model,
-      dispatchExcluded: a.dispatchExcluded,
-      shellAllowed: a.shellAllowed,
-      allowMcp: a.allowMcp,
-      allowSubagents: a.allowSubagents,
-      readPaths: a.readPaths,
+      // Every described grant, whatever they come to be. Listing them by hand here
+      // is how the dashboard ends up not knowing about one.
+      ...Object.fromEntries(GRANT_FIELDS.map((f) => [f, a[f]])),
+      paths: a.paths,
+      tools: a.tools,
+      // Derived, not a flag. The recipient menu greys out anyone a row would only
+      // queue for manual relay (P2), and *why* that is true is the dispatcher's
+      // business — the page should not be re-deriving it from a boolean it happens
+      // to know the meaning of.
+      dispatchable: !a.dispatchExcluded,
+      outbox: a.outbox,
+      silenceTimeoutMs: a.silenceTimeoutMs ?? null,
+      wallClockTimeoutMs: a.wallClockTimeoutMs ?? null,
+      maxBudgetUsd: a.maxBudgetUsd ?? null,
+      // What the flags above actually add up to, in the dispatcher's own words. The
+      // plan is pure and cheap to build, and showing it beside the checkboxes is the
+      // only way an operator can tell a granted boundary from an intended one.
+      //
+      // `what` only. Each boundary also carries the internal requirement it came
+      // from, which is a cross-reference for whoever maintains this application and
+      // noise to everyone else — so it stops at this boundary rather than being
+      // rendered and then apologised for.
+      rationale: buildPermissionPlan(config, a).rationale.map((r) => r.what),
       hooksAudited: a.hasPermissionHooks !== null,
       hasPermissionHooks: a.hasPermissionHooks,
       protocolOk: p.ok,
@@ -228,7 +250,33 @@ export async function agentsPayload(config: Config) {
       otherSkills: s.otherSkills,
     });
   }
-  return { agents: out, commsRoot: config.commsRoot, configFile: config.configFile };
+  return {
+    agents: out,
+    commsRoot: config.commsRoot,
+    configFile: config.configFile,
+    repoRoot: config.repoRoot,
+    defaultModel: config.defaults.model,
+  };
+}
+
+/**
+ * The vocabulary the page renders its controls from.
+ *
+ * Fetched once at load, before anything else. Every list in it is derived from the
+ * constant that defines the thing — message types from `row.ts`, grants and tools
+ * from `roster/edit.ts`, verdicts from `sweep.ts` — so the dashboard cannot offer a
+ * stale menu. A hardcoded `<option>` list in the page was how `information` came to
+ * exist everywhere except the one place an operator could pick it.
+ */
+export function metaPayload() {
+  return {
+    messageTypes: MESSAGE_TYPES.map((name) => ({ name, ...MESSAGE_TYPE_INFO[name] })),
+    outcomes: OUTCOMES.map((name) => ({ name, what: OUTCOME_INFO[name] })),
+    grants: GRANT_FIELDS.map((field) => ({ field, ...GRANT_CATALOGUE[field] })),
+    tools: TOOL_CATALOGUE,
+    toolGroups: Object.entries(TOOL_GROUPS).map(([group, label]) => ({ group, label })),
+    verdicts: INVOCATION_VERDICTS.map((name) => ({ name, ...VERDICT_INFO[name] })),
+  };
 }
 
 /**

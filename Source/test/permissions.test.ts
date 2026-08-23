@@ -30,7 +30,7 @@ function agent(over: Partial<Agent> = {}): Agent {
     shellAllowed: false,
     allowMcp: false,
     allowSubagents: false,
-    readPaths: [],
+    paths: [],
     tools: ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'TodoWrite'],
     silenceTimeoutMs: undefined,
     wallClockTimeoutMs: undefined,
@@ -113,8 +113,15 @@ test('X3a: allowing a shell flips skill-write to denied — the two hold each ot
   const deny = plan.settings.permissions.deny.join('\n');
   assert.ok(deny.includes('.claude/skills/**'), 'with a shell, a self-written skill becomes an escalation path');
   assert.ok(deny.includes('.claude/commands/**'));
-  // And X2 is recorded rather than glossed.
-  assert.ok(plan.rationale.some((r) => r.startsWith('X2:')), 'X2 must be recorded explicitly');
+  // And X2 is recorded rather than glossed. The identifier lives in its own field
+  // now, so it can be asserted without the prose having to carry it.
+  const x2 = plan.rationale.find((r) => r.requirement === 'X2');
+  assert.ok(x2, 'X2 must be recorded explicitly');
+  assert.match(x2.what, /shell is ALLOWED/);
+  assert.ok(
+    !plan.rationale.some((r) => /[A-Z][0-9][0-9a-z]?/.test(r.what)),
+    'no requirement identifier may appear in the prose — the dashboard shows that text verbatim'
+  );
 });
 
 test('T6/L2: the comms root is readable and never writable', () => {
@@ -143,12 +150,29 @@ test('L5/X4: another agent home is outside the workspace, which is stronger than
   );
 });
 
-test('X4: a read-only document store is readable and deny-write', () => {
-  const a = agent({ readPaths: ['C:\\YourDirectory\\docs'] });
-  const plan = buildPermissionPlan(config([a]), a);
-  assert.ok(plan.addDirs.includes('C:\\YourDirectory\\docs'));
-  const deny = plan.settings.permissions.deny.join('\n');
-  assert.ok(deny.includes(`Write(${rulePath('C:\\YourDirectory\\docs', '/**')})`));
+test('X4: a read-only path is deny-write; the same path with write ticked is granted', () => {
+  const DOCS = 'C:\\YourDirectory\\docs';
+
+  const ro = agent({ paths: [{ path: DOCS, read: true, write: false }] });
+  const plan = buildPermissionPlan(config([ro]), ro);
+  assert.ok(plan.addDirs.includes(DOCS), 'it has to be in the workspace to be reachable at all');
+  assert.ok(plan.settings.permissions.allow.includes(`Read(${rulePath(DOCS, '/**')})`));
+  assert.ok(plan.settings.permissions.deny.includes(`Write(${rulePath(DOCS, '/**')})`));
+
+  // The same directory with write ticked. The denial has to be *gone*, not merely
+  // outvoted: a denial beats a permission, so leaving both in place grants nothing
+  // while looking on screen exactly like a grant.
+  const rw = agent({ paths: [{ path: DOCS, read: true, write: true }] });
+  const p2 = buildPermissionPlan(config([rw]), rw);
+  assert.ok(p2.settings.permissions.allow.includes(`Write(${rulePath(DOCS, '/**')})`));
+  assert.ok(
+    !p2.settings.permissions.deny.some((r) => r.startsWith('Write(') && r.includes('YourDirectory/docs')),
+    'a write grant that is also denied is not a grant'
+  );
+  assert.ok(
+    p2.settings.permissions.allow.includes(`Read(${rulePath(DOCS, '/**')})`),
+    'write implies read — the filesystem offers no other arrangement'
+  );
 });
 
 test('X5/F2: no context-stripping flag is ever built into argv', () => {
@@ -189,9 +213,14 @@ test('X3: with MCP disallowed, no ambient .mcp.json server can be connected', ()
   assert.ok(!buildArgv(c, b, buildPermissionPlan(c, b)).includes('--strict-mcp-config'));
 });
 
-test('rulePath produces an absolute rule with forward slashes and no trailing separator', () => {
-  assert.equal(rulePath('C:\\YourDirectory\\agents\\worker'), '//C:/YourDirectory/agents/worker');
-  assert.equal(rulePath('C:\\YourDirectory\\agents\\worker', '/**'), '//C:/YourDirectory/agents/worker/**');
+test('rulePath produces a bare absolute rule — forward slashes, no prefix', () => {
+  // The absent prefix is the whole point of this assertion. Measured on 2.1.239: a
+  // `//`-prefixed rule matches nothing, as an allow *or* as a deny, so a regression
+  // here would quietly turn every absolute denial back into decoration while every
+  // other test in this file kept passing.
+  assert.equal(rulePath('C:\\YourDirectory\\agents\\worker'), 'C:/YourDirectory/agents/worker');
+  assert.equal(rulePath('C:\\YourDirectory\\agents\\worker', '/**'), 'C:/YourDirectory/agents/worker/**');
+  assert.ok(!rulePath('C:\\x').startsWith('/'), 'a leading slash is what made these inert');
 });
 
 // ---- the message contract: MCP tool and skill ------------------------------

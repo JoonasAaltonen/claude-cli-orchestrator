@@ -185,7 +185,12 @@ function renderThread(t: Thread, now: Date, staleDays: number): string[] {
   out.push('| Row | From | Waiting on | Why | Blocked by |');
   out.push('|---|---|---|---|---|');
   for (const o of t.outstanding) {
-    const why = o.reason === 'awaiting-signoff' ? 'sign-off required' : 'unanswered request';
+    const why =
+      o.reason === 'awaiting-signoff'
+        ? 'sign-off required'
+        : o.reason === 'unread-information'
+          ? 'information unacknowledged'
+          : 'unanswered request';
     out.push(
       `| ${o.row.id} | ${o.row.writer} | ${o.awaiting.join(', ')} | ${why} | ${o.blockedBy.join(', ') || '—'} |`
     );

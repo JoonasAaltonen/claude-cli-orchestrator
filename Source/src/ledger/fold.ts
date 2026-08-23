@@ -46,7 +46,7 @@ export interface Outstanding {
   row: Row;
   /** Who the ball is with. */
   awaiting: string[];
-  reason: 'unanswered-request' | 'awaiting-signoff';
+  reason: 'unanswered-request' | 'awaiting-signoff' | 'unread-information';
   /**
    * Rows the awaiting party is itself still waiting on before it can act — its own
    * unanswered requests, further down the same thread.
@@ -254,8 +254,12 @@ export function mayReadBody(thread: Thread, who: string): boolean {
  * work, not something derivable from a row, so the fold does not attempt it. What
  * the fold does instead is mechanical and matches M2's default: a `request` is
  * outstanding until the agent it was addressed to answers it, and a row carrying a
- * non-blank `Needs` is outstanding until each named agent signs off. Everything
- * else is report-and-act — one row, no counter-signature.
+ * non-blank `Needs` is outstanding until each named agent signs off. An
+ * `information` row joins them, on the weakest terms of the three — outstanding
+ * until its addressee has replied anything at all, because the point of the type is
+ * that the fact reaches a party who can write it into their own notes, and being
+ * dispatched is the only way anything reaches an agent. Everything else is
+ * report-and-act — one row, no counter-signature.
  */
 function outstandingIn(group: Row[]): Outstanding[] {
   const out: Outstanding[] = [];
@@ -284,6 +288,19 @@ function outstandingIn(group: Row[]): Outstanding[] {
         out.push({ row: r, awaiting: missing, reason: 'awaiting-signoff', blockedBy: [] });
         continue;
       }
+    }
+
+    // An `information` row is addressed to someone so that they can keep the fact,
+    // which means it has to reach them: nothing else in this application invokes an
+    // agent, so a type that never becomes outstanding is a type that is never read.
+    // Any reply from the addressee closes it — a one-line report that it was noted is
+    // the expected answer, and there is nothing here for an outcome to describe, so
+    // no particular type or outcome is demanded.
+    if (r.type === 'information') {
+      const acked = new Set(replies.map((x) => x.writer));
+      const unread = r.to.filter((t) => !acked.has(t));
+      if (unread.length) out.push({ row: r, awaiting: unread, reason: 'unread-information', blockedBy: [] });
+      continue;
     }
 
     if (r.type !== 'request') continue;

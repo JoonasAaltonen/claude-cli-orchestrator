@@ -99,6 +99,29 @@
     background: var(--ok); margin-right: .4rem; animation: pulse 1.4s ease-in-out infinite;
   }
   @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .25 } }
+  /* Checkboxes need to sit beside their label, which the block rule above forbids. */
+  label.cb { display: flex; gap: .5rem; align-items: baseline; color: var(--ink); font-size: .88rem; margin: .35rem 0; }
+  label.cb input { margin: 0; flex: none; }
+  label.cb .hint { font-size: .78rem; }
+  label.cb.risky span:first-of-type { color: var(--bad); }
+  .grantbox { border: 1px solid var(--line); border-radius: 5px; padding: .5rem .7rem; margin: .4rem 0 .8rem; }
+  .grantbox > .title { font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  details.agent { padding: 0; }
+  details.agent > summary { padding: .75rem 1rem; cursor: pointer; list-style: none; }
+  details.agent > summary::-webkit-details-marker { display: none; }
+  details.agent[open] > summary { border-bottom: 1px solid var(--line); }
+  details.agent .inner { padding: .8rem 1rem 1rem; }
+  .actions { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: 1rem; padding-top: .8rem; border-top: 1px solid var(--line); }
+  .saved { color: var(--ok); font-size: .85rem; align-self: center; }
+  .pathrow { display: flex; gap: .5rem; align-items: center; margin: .35rem 0; flex-wrap: wrap; }
+  .pathrow input[type=text] { flex: 1 1 22rem; min-width: 12rem; }
+  .pathrow label.cb { margin: 0; }
+  .pickrow { padding: .35rem .5rem; border-radius: 4px; cursor: pointer; font-size: .9rem; }
+  .pickrow:hover { background: var(--chip); }
+  #pickList { max-height: 46vh; overflow-y: auto; border: 1px solid var(--line); border-radius: 5px; padding: .3rem; margin-top: .6rem; }
+  #pickCrumbs { display: flex; gap: .3rem; align-items: center; flex-wrap: wrap; font-size: .85rem; }
+  #pickCrumbs button { padding: .15rem .45rem; }
+  .failed { color: var(--bad); font-size: .85rem; align-self: center; }
 </style>
 </head>
 <body>
@@ -117,6 +140,7 @@
   <button data-tab="ledger" aria-selected="false">Ledger</button>
   <button data-tab="agents" aria-selected="false">Agents</button>
   <button data-tab="runs" aria-selected="false">Runs</button>
+  <button data-tab="config" aria-selected="false">Config</button>
 </nav>
 
 <main>
@@ -145,15 +169,15 @@
       </div>
       <div>
         <label for="fType">Type</label>
-        <select id="fType">
-          <option value="request">request</option>
-          <option value="response">response</option>
-          <option value="report">report</option>
-          <option value="decision">decision</option>
-          <option value="signoff">signoff</option>
-        </select>
+        <select id="fType"></select>
       </div>
     </div>
+    <div id="fOutcomeRow" hidden>
+      <label for="fOutcome">Outcome &mdash; required on this type</label>
+      <select id="fOutcome"></select>
+      <div class="muted" id="fOutcomeHint" style="font-size:.8rem;margin-top:.3rem"></div>
+    </div>
+    <div class="muted" id="fTypeHint" style="font-size:.8rem;margin:-.3rem 0 .6rem"></div>
     <label for="fSummary">Summary &mdash; the line every agent sees first</label>
     <input type="text" id="fSummary" placeholder="How did Q3 go and what should we do about it">
     <label for="fBody">Body</label>
@@ -198,7 +222,25 @@
   <section id="ledger" hidden></section>
   <section id="agents" hidden></section>
   <section id="runs" hidden></section>
+  <section id="config" hidden></section>
 </main>
+
+<dialog id="picker">
+  <div class="dlg-head">
+    <strong>Choose a directory</strong>
+    <span class="grow"></span>
+    <button class="plain" onclick="document.getElementById('picker').close()">Cancel</button>
+  </div>
+  <div class="dlg-body">
+    <div id="pickCrumbs"></div>
+    <div id="pickList"></div>
+    <div class="row" style="margin-top:.8rem">
+      <span class="muted mono" id="pickPath"></span>
+      <span class="grow"></span>
+      <button class="go" id="pickUse">Use this directory</button>
+    </div>
+  </div>
+</dialog>
 
 <dialog id="thread">
   <div class="dlg-head">
@@ -226,21 +268,101 @@ function when(iso) {
   return hrs >= 1 ? hrs + 'h ago' : 'just now';
 }
 
+/**
+ * The vocabulary the controls are built from — message types, outcomes, agent
+ * grants, tools, verdicts. Fetched once, before the first render.
+ *
+ * Every menu below used to be typed out in this file. That is a copy of something
+ * the server already knows, and copies go stale silently: a message type existed in
+ * the ledger, the validator, the CLI and the MCP tool for a day before anyone
+ * noticed the dashboard could not offer it. Nothing here is a list of names any
+ * more — it is a rendering of one.
+ */
+let META = { messageTypes: [], outcomes: [], grants: [], tools: [], verdicts: [] };
+
+async function loadMeta() {
+  META = await api('/api/meta');
+}
+
+/** Index a meta list by name, for the lookups the renderers do per row. */
+function byName(list, key) {
+  const out = {};
+  (list || []).forEach(function (x) { out[x[key || 'name']] = x; });
+  return out;
+}
+
+/**
+ * Reporting the page's own failures to the server, which logs them to the terminal
+ * and to state/problems.jsonl.
+ *
+ * Only failures that originate *here*. An error that came back from the server has
+ * already been logged by the server, and echoing it would put every failed request
+ * in the log twice — so `post` and `api` mark those, and this skips them.
+ *
+ * Deliberately fire-and-forget, and deliberately silent on failure. The reporter is
+ * the last thing that should be able to interrupt anything, and a page that cannot
+ * report an error has nothing useful to say about that either.
+ */
+function reportProblem(what, where, detail) {
+  try {
+    const u = new URL('/api/client-error', location.origin);
+    u.searchParams.set('t', TOKEN);
+    fetch(u, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ what: String(what), where: where || location.hash || '/', detail: detail || null }),
+      keepalive: true,
+    }).catch(function () {});
+  } catch (e) { /* nothing to be done about it from here */ }
+}
+
+/** Anything the page throws and nobody catches. */
+window.addEventListener('error', function (e) {
+  reportProblem(
+    e.message || 'uncaught error',
+    (e.filename || 'page') + ':' + (e.lineno || 0) + ':' + (e.colno || 0),
+    e.error && e.error.stack ? e.error.stack : null
+  );
+});
+
+/** And anything an async path rejects with and nobody catches. */
+window.addEventListener('unhandledrejection', function (e) {
+  const r = e.reason;
+  if (r && r.fromServer) return;
+  reportProblem(
+    (r && r.message) || String(r) || 'unhandled rejection',
+    'unhandled rejection',
+    r && r.stack ? r.stack : null
+  );
+});
+
+/** For the handlers that already catch: report it, then carry on showing it. */
+function reportCaught(err, where) {
+  if (!err || err.fromServer) return;
+  reportProblem(err.message || String(err), where, err.stack || null);
+}
+
 async function api(path, params) {
   const u = new URL(path, location.origin);
   u.searchParams.set('t', TOKEN);
   for (const [k, v] of Object.entries(params || {})) u.searchParams.set(k, v);
   const res = await fetch(u);
-  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+  if (!res.ok) {
+    const err = new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    // The server logged this one already, when it sent it.
+    err.fromServer = true;
+    err.status = res.status;
+    throw err;
+  }
   return res.json();
 }
 
-// The verdict union lives in dispatch/sweep.ts. Only one value means an artefact
-// actually appeared; 'ran-nothing' is the common failure and reads green nowhere.
+// Each verdict carries its own tone, from dispatch/sweep.ts. This used to be an if
+// chain that had to be revisited every time a verdict was added — and a verdict it
+// had not heard of came out looking like a failure, whatever it meant.
 function verdictClass(v) {
-  if (v === 'worked') return 'ok';
-  if (v === 'ran-nothing' || v === 'produced-invalid') return 'warn';
-  return 'bad';
+  const known = byName(META.verdicts)[v];
+  return known ? known.tone : 'bad';
 }
 
 function chips(t) {
@@ -346,8 +468,8 @@ function paintRoster() {
   const keep = sel.value;
   sel.innerHTML = roster.length
     ? roster.map(function (g) {
-        return '<option value="' + esc(g.name) + '"' + (g.dispatchExcluded ? ' disabled' : '') + '>'
-          + esc(g.name) + (g.dispatchExcluded ? ' (dispatch excluded)' : '')
+        return '<option value="' + esc(g.name) + '"' + (g.dispatchable ? '' : ' disabled') + '>'
+          + esc(g.name) + (g.dispatchable ? '' : ' (not dispatched)')
           + (g.description ? ' — ' + esc(g.description) : '') + '</option>';
       }).join('')
     : '<option value="">no agents registered</option>';
@@ -363,14 +485,14 @@ async function renderAgents() {
   const a = await api('/api/agents');
   $('commsRoot').textContent = a.commsRoot;
   roster = a.agents;
+  // The Config tab reads the same payload. refresh() calls this first on every tab,
+  // so handing the answer over saves a second identical fetch.
+  agentsData = a;
   paintRoster();
   $('agents').innerHTML = '<h2>Roster <span class="muted">(' + a.agents.length + ')</span></h2>'
     + (a.agents.length ? a.agents.map((g) => {
-        const flags = [];
-        if (g.dispatchExcluded) flags.push('<span class="chip warn">dispatch excluded</span>');
-        if (g.shellAllowed) flags.push('<span class="chip bad">shell allowed</span>');
-        if (g.allowMcp) flags.push('<span class="chip bad">mcp</span>');
-        if (g.allowSubagents) flags.push('<span class="chip bad">subagents</span>');
+        const flags = grantChips(g);
+        if (reachesNetwork(g)) flags.push('<span class="chip warn">network</span>');
         if (!g.hooksAudited) flags.push('<span class="chip warn">hooks unaudited</span>');
         else if (g.hasPermissionHooks) flags.push('<span class="chip warn">has hooks</span>');
         flags.push(g.protocolOk ? '<span class="chip ok">protocol ' + esc(g.protocolVersion || '') + '</span>' : '<span class="chip bad">protocol missing</span>');
@@ -378,7 +500,10 @@ async function renderAgents() {
         return '<div class="card"><div class="row"><strong>' + esc(g.name) + '</strong>' + flags.join(' ') + '</div>'
           + '<div class="muted mono">' + esc(g.home) + '</div>'
           + (g.description ? '<div>' + esc(g.description) + '</div>' : '')
-          + (g.readPaths.length ? '<div class="muted">reads: ' + esc(g.readPaths.join(', ')) + '</div>' : '')
+          + '<div class="muted">tools: ' + esc(g.tools.join(', ')) + '</div>'
+          + (g.paths.length ? '<div class="muted">' + g.paths.map(function (p) {
+              return (p.write ? 'read+write' : 'read only') + ': ' + esc(p.path);
+            }).join('<br>') + '</div>' : '')
           + (g.otherSkills.length ? '<div class="muted">own skills, untouched: ' + esc(g.otherSkills.join(', ')) + '</div>' : '')
           + '</div>';
       }).join('') : '<div class="empty">No agents registered. Use <span class="mono">orchestrator agent add</span>.</div>')
@@ -416,7 +541,388 @@ async function openThread(id) {
   $('thread').showModal();
 }
 
-const RENDER = { now: renderNow, ledger: renderLedger, agents: renderAgents, runs: renderRuns };
+// ---------------------------------------------------------------- the picker
+//
+// The server browses; this only displays. A browser cannot give a page an absolute
+// filesystem path — `webkitdirectory` yields paths relative to the chosen folder and
+// `showDirectoryPicker()` yields a handle with a name — so every path shown here came
+// from the server and goes back to it unchanged. That is the point: nobody has to
+// know whether it wants slashes or backslashes, a trailing separator, or quotes.
+
+let pickTarget = null;
+let pickAt = null;
+
+async function pickerShow(at) {
+  const l = await api('/api/fs', at ? { path: at } : {});
+  pickAt = l.path;
+  $('pickPath').textContent = l.path || 'This computer';
+
+  const crumbs = l.path
+    ? '<button class="plain" data-goto="">drives</button> '
+      + l.crumbs.map(function (c) {
+          return '<button class="plain" data-goto="' + esc(c.path) + '">' + esc(c.name) + '</button>';
+        }).join(' <span class="muted">&rsaquo;</span> ')
+    : '<span class="muted">Pick a drive to start.</span>';
+  $('pickCrumbs').innerHTML = crumbs;
+
+  let body = '';
+  if (l.note) body += '<div class="banner">' + esc(l.note) + '</div>';
+  if (l.parent) body += '<div class="pickrow" data-goto="' + esc(l.parent) + '"><span class="muted">..</span></div>';
+  body += l.entries.map(function (e) {
+    return '<div class="pickrow" data-goto="' + esc(e.path) + '">' + esc(e.name) + '</div>';
+  }).join('');
+  if (!l.entries.length && !l.note) body += '<div class="empty">No subdirectories here.</div>';
+  if (l.truncated) body += '<div class="empty">Only the first 1000 subdirectories are listed.</div>';
+  $('pickList').innerHTML = body;
+
+  $('pickUse').disabled = !l.path;
+  $('picker').showModal();
+}
+
+/** Opens the picker and calls back with the chosen absolute path. */
+function pickDirectory(startAt, onChosen) {
+  pickTarget = onChosen;
+  pickerShow(startAt || null).catch(function (err) { alert(err.message); });
+}
+
+document.addEventListener('click', function (e) {
+  const nav = e.target.closest('#picker [data-goto]');
+  if (nav) {
+    pickerShow(nav.dataset.goto || null).catch(function (err) { alert(err.message); });
+    return;
+  }
+  if (e.target.id === 'pickUse' && pickAt && pickTarget) {
+    const chosen = pickAt;
+    const cb = pickTarget;
+    pickTarget = null;
+    $('picker').close();
+    cb(chosen);
+  }
+});
+
+// ------------------------------------------------------------- the paths editor
+//
+// One row per directory with two checkboxes, rather than a read list and a write
+// list. A directory the agent both reads and writes would otherwise be typed twice
+// and kept in step by hand, and the two lists could then disagree about it.
+
+function pathRow(entry) {
+  const p = entry || { path: '', read: true, write: false };
+  return '<div class="pathrow">'
+    + '<input type="text" class="mono" data-path value="' + esc(p.path) + '" placeholder="a directory outside this agent&rsquo;s home">'
+    + '<button type="button" class="plain" data-act="browse">Browse…</button>'
+    + '<label class="cb"><input type="checkbox" data-read' + (p.read ? ' checked' : '') + '><span>read</span></label>'
+    + '<label class="cb"><input type="checkbox" data-write' + (p.write ? ' checked' : '') + '><span>write</span></label>'
+    + '<button type="button" class="plain danger" data-act="droppath">Remove</button>'
+    + '</div>';
+}
+
+function pathsBlock(paths) {
+  return '<div class="grantbox"><div class="title">Directories outside its home</div>'
+    + '<p class="muted" style="margin:.2rem 0 .6rem">Its own home and outbox are already covered above. '
+    + 'Anything listed here is somewhere else on this machine — a shared document store, a project it '
+    + 'writes into. Ticking write implies read; there is no other arrangement a filesystem offers.</p>'
+    + '<div data-paths>' + (paths || []).map(pathRow).join('') + '</div>'
+    + '<button type="button" class="plain" data-act="addpath">Add a directory</button>'
+    + '</div>';
+}
+
+/** Reads the path rows back out of a form. */
+function readPathRows(form) {
+  const rows = [];
+  // Only the rows inside the [data-paths] list are grants. The home field on the
+  // registration form is a .pathrow too — it borrows the layout to sit beside its own
+  // browse button — and it has no [data-path] input, so a plain '.pathrow' sweep read
+  // null.value there and the whole registration failed before it reached the server.
+  form.querySelectorAll('[data-paths] .pathrow').forEach(function (row) {
+    const field = row.querySelector('[data-path]');
+    if (!field) return;
+    const p = field.value.trim();
+    if (!p) return;
+    rows.push({
+      path: p,
+      read: row.querySelector('[data-read]').checked,
+      write: row.querySelector('[data-write]').checked,
+    });
+  });
+  return rows;
+}
+
+document.addEventListener('click', function (e) {
+  const btn = e.target.closest('#config [data-act="addpath"], #config [data-act="droppath"], #config [data-act="browse"]');
+  if (!btn) return;
+
+  if (btn.dataset.act === 'addpath') {
+    const list = btn.closest('.grantbox').querySelector('[data-paths]');
+    list.insertAdjacentHTML('beforeend', pathRow(null));
+    configDirty = true;
+    return;
+  }
+  if (btn.dataset.act === 'droppath') {
+    btn.closest('.pathrow').remove();
+    configDirty = true;
+    return;
+  }
+  // Browse. Both places it appears wrap their input in a .pathrow — a path entry
+  // and the home field on the registration form — but they name the input
+  // differently, because only one of them is a path row the operator can remove.
+  const row = btn.closest('.pathrow');
+  const field = row && row.querySelector('[data-path], [data-field="home"]');
+  if (!field) return;
+  pickDirectory(field.value.trim() || null, function (chosen) {
+    field.value = chosen;
+    configDirty = true;
+  });
+});
+
+// ------------------------------------------------------------------ the roster
+//
+// The one tab that writes configuration rather than reading it. Every field here
+// maps to a roster entry the CLI can set too — the server calls the same
+// roster/edit.ts either way, so a rule refused on the command line is refused here
+// in the same words.
+
+/** Set while a form has unsaved changes, so a background refresh cannot wipe them. */
+let configDirty = false;
+let agentsData = null;
+
+function cb(field, label, on, hint, risky) {
+  return '<label class="cb' + (risky ? ' risky' : '') + '">'
+    + '<input type="checkbox" data-field="' + field + '"' + (on ? ' checked' : '') + '>'
+    + '<span>' + esc(label) + '</span>'
+    + (hint ? '<span class="muted hint">' + esc(hint) + '</span>' : '')
+    + '</label>';
+}
+
+/**
+ * The tool checkboxes.
+ *
+ * Shell, subagents and MCP are deliberately not among them — each has its own flag
+ * below, because each carries a requirement of its own. Offering a boundary twice is
+ * how the two copies end up disagreeing.
+ */
+function toolBoxes(cat, chosen) {
+  let html = '';
+  for (const grp of (META.toolGroups || [])) {
+    const items = cat.filter(function (t) { return t.group === grp.group; });
+    if (!items.length) continue;
+    html += '<div class="grantbox"><div class="title">' + esc(grp.label) + '</div>'
+      + items.map(function (t) {
+          return '<label class="cb' + (t.caution ? ' risky' : '') + '">'
+            + '<input type="checkbox" data-tool="' + esc(t.name) + '"' + (chosen.indexOf(t.name) >= 0 ? ' checked' : '') + '>'
+            + '<span class="mono">' + esc(t.name) + '</span>'
+            + '<span class="muted hint">' + esc(t.what) + (t.caution ? ' ' + t.caution : '') + '</span>'
+            + '</label>';
+        }).join('')
+      + '</div>';
+  }
+  return html;
+}
+
+/**
+ * The grant checkboxes — every boolean the server describes, in its order.
+ *
+ * Five of these were written out by hand here, with their labels and their
+ * explanations, and the same five were written out again in the CLI, the patcher and
+ * both HTTP handlers. `GRANT_CATALOGUE` in roster/edit.ts is the only copy now, and
+ * a flag the config schema grows cannot compile until it is in there — so it arrives
+ * on this page by itself.
+ *
+ * A registration form has no agent to read from, so an unticked box means the
+ * catalogue's own default rather than off.
+ */
+function grantBoxes(g) {
+  const risky = META.grants.filter(function (x) { return x.risky; });
+  const plain = META.grants.filter(function (x) { return !x.risky; });
+  const box = function (title, items) {
+    if (!items.length) return '';
+    return '<div class="grantbox"><div class="title">' + esc(title) + '</div>'
+      + items.map(function (x) {
+          const on = g ? !!g[x.field] : x.fallback;
+          return cb(x.field, x.label, on, x.hint, x.risky);
+        }).join('')
+      + '</div>';
+  };
+  return box('What it may reach', plain) + box('Boundaries worth thinking about', risky);
+}
+
+/**
+ * The chips on a roster row: every grant sitting at something other than its
+ * default. The default is not news, and a chip on every row is a chip nobody reads.
+ */
+/** Which tools reach the network is the catalogue's business, not this page's. */
+function reachesNetwork(g) {
+  const known = byName(META.tools);
+  return (g.tools || []).some(function (t) { return known[t] && known[t].group === 'network'; });
+}
+
+function grantChips(g) {
+  return META.grants
+    .filter(function (x) { return !!g[x.field] !== x.fallback; })
+    .map(function (x) {
+      const tone = x.chip.tone === 'plain' ? '' : ' ' + x.chip.tone;
+      return '<span class="chip' + tone + '">' + esc(x.chip.label) + '</span>';
+    });
+}
+
+function agentFields(g, cat, defaultModel) {
+  const tools = g && g.tools ? g.tools : ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'TodoWrite'];
+  const num = function (field, label, value, hint) {
+    return '<label>' + esc(label) + ' <span class="muted">' + esc(hint) + '</span></label>'
+      + '<input type="text" data-field="' + field + '" value="' + (value == null ? '' : esc(value)) + '" placeholder="default">';
+  };
+  const NL = String.fromCharCode(10);
+  return '<label>Description</label>'
+    + '<input type="text" data-field="description" value="' + esc(g ? g.description : '') + '"'
+    + ' placeholder="What this agent is for. You see this; other agents do not.">'
+    + '<label>Model <span class="muted">blank uses the default, ' + esc(defaultModel) + '</span></label>'
+    + '<input type="text" data-field="model" value="' + esc(g && g.model !== defaultModel ? (g.model || '') : '') + '" placeholder="' + esc(defaultModel) + '">'
+
+    + '<h2>What it may do</h2>'
+    + toolBoxes(cat, tools)
+
+    + grantBoxes(g)
+
+    + pathsBlock(g ? g.paths : [])
+
+    + '<h2>Limits for this agent</h2>'
+    + '<div class="cols">'
+    + '<div>' + num('silenceTimeoutMs', 'Silence timeout', g ? g.silenceTimeoutMs : null, 'ms') + '</div>'
+    + '<div>' + num('wallClockTimeoutMs', 'Wall-clock timeout', g ? g.wallClockTimeoutMs : null, 'ms') + '</div>'
+    + '<div>' + num('maxBudgetUsd', 'Budget ceiling', g ? g.maxBudgetUsd : null, 'USD per invocation') + '</div>'
+    + '</div>';
+}
+
+function agentCard(g, cat, defaultModel) {
+  const NL = String.fromCharCode(10);
+  const flags = grantChips(g);
+  if (reachesNetwork(g)) flags.push('<span class="chip warn">network</span>');
+  if (!g.protocolOk || !g.skillsOk) flags.push('<span class="chip bad">contract not installed</span>');
+
+  return '<details class="card agent" data-agent="' + esc(g.name) + '">'
+    + '<summary><div class="row"><strong>' + esc(g.name) + '</strong>' + flags.join(' ')
+    + '<span class="grow"></span><span class="muted mono">' + esc(g.home) + '</span></div></summary>'
+    + '<div class="inner"><form data-form="' + esc(g.name) + '">'
+    + agentFields(g, cat, defaultModel)
+    + '<details style="margin-top:1rem"><summary class="muted">What these settings come to, in the dispatcher’s own words</summary>'
+    + '<pre>' + esc(g.rationale.join(NL + NL)) + '</pre></details>'
+    + '<div class="actions">'
+    + '<button type="button" class="go" data-act="save">Save</button>'
+    + '<button type="button" class="plain" data-act="install">'
+    + (g.protocolOk && g.skillsOk ? 'Reinstall protocol and skills' : 'Install protocol and skills') + '</button>'
+    + '<button type="button" class="plain danger" data-act="remove">Remove from roster</button>'
+    + '<span class="grow"></span><span data-note></span>'
+    + '</div></form></div></details>';
+}
+
+async function renderConfig() {
+  // A background refresh must not throw away half-typed changes. The panel is
+  // rebuilt from the server after every save, which is the only moment the two are
+  // certain to agree anyway.
+  if (configDirty && $('config').innerHTML) return;
+
+  const a = agentsData || (await api('/api/agents'));
+  agentsData = a;
+  const cat = META.tools || [];
+
+  $('config').innerHTML =
+    '<h2>Roster <span class="muted">(' + a.agents.length + ')</span></h2>'
+    + (a.agents.length
+        ? a.agents.map(function (g) { return agentCard(g, cat, a.defaultModel); }).join('')
+        : '<div class="empty">No agents yet. Register a directory you already have, below.</div>')
+    + '<h2>Register an agent</h2>'
+    + '<div class="card"><form data-form="" data-new="1">'
+    + '<p class="muted">This registers a directory that already exists; it does not create one. '
+    + 'The only things written into it are the outbox it will be swept from and the generated permission file.</p>'
+    + '<label>Name <span class="muted">no spaces — this is what other agents address it as</span></label>'
+    + '<input type="text" data-field="name" placeholder="marketing">'
+    + '<label>Home directory</label>'
+    + '<div class="pathrow"><input type="text" class="mono" data-field="home" placeholder="the full path to a directory that already exists">'
+    + '<button type="button" class="plain" data-act="browse">Browse…</button></div>'
+    + agentFields(null, cat, a.defaultModel)
+    + '<div class="grantbox"><div class="title">On registration</div>'
+    + cb('installProtocol', 'Install the protocol file and the ledger skills', true,
+        'Writes .claude/orchestrator-protocol.md, one line into its CLAUDE.md, and the two ledger skills. Without them it is still dispatched, but it has no standing instructions about any of this.')
+    + '</div>'
+    + '<div class="actions"><button type="button" class="go" data-act="add">Register</button>'
+    + '<span class="grow"></span><span data-note></span></div>'
+    + '</form></div>'
+    + '<p class="muted mono">' + esc(a.configFile) + '</p>';
+}
+
+/** Reads a form back into the shape the roster endpoints take. */
+function readForm(form) {
+  const body = {};
+  form.querySelectorAll('[data-field]').forEach(function (i) {
+    body[i.dataset.field] = i.type === 'checkbox' ? i.checked : i.value;
+  });
+  body.tools = Array.prototype.slice
+    .call(form.querySelectorAll('[data-tool]'))
+    .filter(function (i) { return i.checked; })
+    .map(function (i) { return i.dataset.tool; });
+  // The path rows are not [data-field] controls, because each is three inputs that
+  // only mean something together.
+  body.paths = readPathRows(form);
+  return body;
+}
+
+function note(form, text, bad) {
+  const el = form.querySelector('[data-note]');
+  if (el) { el.className = bad ? 'failed' : 'saved'; el.textContent = text; }
+}
+
+document.addEventListener('input', function (e) {
+  if (e.target.closest('#config form')) configDirty = true;
+});
+
+// The four actions that talk to the server. Named explicitly rather than matching
+// every [data-act] in the panel: the path editor's buttons live in the same forms,
+// and a catch-all swallowed them — disabling the button, falling through every
+// branch below, and then re-rendering the panel, which threw away the row that had
+// just been added. Adding a control anywhere in this tab used to break it silently.
+const ROSTER_ACTIONS = ['add', 'save', 'install', 'remove'];
+
+document.addEventListener('click', function (e) {
+  const btn = e.target.closest('#config [data-act]');
+  if (!btn || ROSTER_ACTIONS.indexOf(btn.dataset.act) < 0) return;
+  const form = btn.closest('form');
+  const act = btn.dataset.act;
+  const name = form.dataset.form;
+  const NL = String.fromCharCode(10);
+
+  const done = async function () {
+    if (act === 'add') {
+      const r = await post('/api/agents/add', readForm(form));
+      note(form, 'Registered ' + r.agent + (r.warnings.length ? ' — ' + r.warnings.join(' ') : ''));
+    } else if (act === 'save') {
+      const r = await post('/api/agents/update', Object.assign(readForm(form), { name: name }));
+      // Warnings are not refusals. A path that reaches somewhere consequential is
+      // still granted — it is just said out loud, once, at the moment of granting.
+      note(form, r.warnings && r.warnings.length ? 'Saved — ' + r.warnings.join(' ') : 'Saved', !!(r.warnings && r.warnings.length));
+    } else if (act === 'install') {
+      const r = await post('/api/agents/install', { name: name });
+      note(form, r.protocol.claudeMdMissing ? 'Installed, but there is no CLAUDE.md to point at it' : 'Installed');
+    } else if (act === 'remove') {
+      if (!confirm('Remove ' + name + ' from the roster?' + NL + NL
+        + 'Its directory is not touched, and the rows it already wrote stay in the ledger — nothing there is ever edited or deleted.')) return;
+      await post('/api/agents/remove', { name: name });
+    }
+    // Re-read rather than patch. The server reloaded the config through the same
+    // cross-checks a fresh start would run, and that is the answer worth showing.
+    configDirty = false;
+    agentsData = null;
+    await renderConfig();
+  };
+
+  btn.disabled = true;
+  done().catch(function (err) {
+          reportCaught(err, 'roster ' + act + (name ? ' ' + name : ''));
+          note(form, err.message, true);
+        })
+        .finally(function () { btn.disabled = false; });
+});
+
+const RENDER = { now: renderNow, ledger: renderLedger, agents: renderAgents, runs: renderRuns, config: renderConfig };
 let current = 'now';
 
 // Each panel is fetched and rendered on its own. They used to share a try block with
@@ -425,9 +931,12 @@ let current = 'now';
 async function refresh() {
   const problems = [];
   let s = null;
-  try { s = await api('/api/status'); paintHeader(s); } catch (err) { problems.push(err.message); }
-  try { await renderAgents(); } catch (err) { problems.push(err.message); }
-  try { await RENDER[current](s); } catch (err) { problems.push(err.message); }
+  const attempt = async function (what, fn) {
+    try { return await fn(); } catch (err) { reportCaught(err, what); problems.push(err.message); return null; }
+  };
+  s = await attempt('header', async function () { const r = await api('/api/status'); paintHeader(r); return r; });
+  await attempt('agents panel', renderAgents);
+  await attempt(current + ' panel', function () { return RENDER[current](s); });
   $('error').innerHTML = problems.length
     ? '<div class="banner">' + problems.map(esc).join('<br>') + '</div>'
     : '';
@@ -475,7 +984,7 @@ document.querySelectorAll('nav button').forEach((b) => {
   b.addEventListener('click', () => {
     current = b.dataset.tab;
     document.querySelectorAll('nav button').forEach((x) => x.setAttribute('aria-selected', String(x === b)));
-    ['now', 'ledger', 'agents', 'runs'].forEach((id) => { $(id).hidden = id !== current; });
+    ['now', 'ledger', 'agents', 'runs', 'config'].forEach((id) => { $(id).hidden = id !== current; });
     // The starter, the compose form and the run console belong to Now. Leaving them
     // on every tab pushed the other sections below the fold once a run console opened,
     // which read as the tab not opening at all.
@@ -508,6 +1017,7 @@ async function post(path, body) {
     // already says who and how to clear it.
     const err = new Error(data.error || res.statusText);
     err.status = res.status;
+    err.fromServer = true;
     throw err;
   }
   return data;
@@ -601,6 +1111,46 @@ $('btnCompose').addEventListener('click', function () {
 $('btnCancel').addEventListener('click', function () { $('compose').hidden = true; });
 $('btnHideConsole').addEventListener('click', function () { $('console').hidden = true; });
 
+/**
+ * The type menu, and the outcome control that follows from it.
+ *
+ * M1 puts an outcome on `response` and `signoff` and forbids it everywhere else,
+ * and the page now knows which is which because the server told it. Before, there
+ * was no outcome field at all: choosing `response` here produced a row the validator
+ * refused, with nothing on screen that could have satisfied it.
+ */
+function paintTypeMenu() {
+  const sel = $('fType');
+  const chosen = sel.value;
+  sel.innerHTML = META.messageTypes
+    .map(function (t) { return '<option value="' + esc(t.name) + '">' + esc(t.name) + '</option>'; })
+    .join('');
+  if (chosen) sel.value = chosen;
+  else if (META.messageTypes.some(function (t) { return t.name === 'request'; })) sel.value = 'request';
+
+  $('fOutcome').innerHTML = META.outcomes
+    .map(function (o) { return '<option value="' + esc(o.name) + '">' + esc(o.name) + '</option>'; })
+    .join('');
+  paintTypeHint();
+}
+
+function paintTypeHint() {
+  const t = byName(META.messageTypes)[$('fType').value];
+  $('fTypeHint').textContent = t ? t.what : '';
+  const needsOutcome = !!t && t.outcome === 'required';
+  $('fOutcomeRow').hidden = !needsOutcome;
+  if (needsOutcome) {
+    const o = byName(META.outcomes)[$('fOutcome').value];
+    $('fOutcomeHint').textContent = o ? o.what : '';
+  }
+  // Saying it needs a replyTo is more use than letting the server refuse it.
+  const also = t && t.replyTo === 'required' ? ' Requires the row ID it answers, under More.' : '';
+  if (also) $('fTypeHint').textContent += also;
+}
+
+$('fType').addEventListener('change', paintTypeHint);
+$('fOutcome').addEventListener('change', paintTypeHint);
+
 function composeBody() {
   // The extra names go into the body as a sentence the agent reads, not into `to`.
   // `to` is who is asked; this is who they may ask.
@@ -619,6 +1169,7 @@ function composeBody() {
     summary: $('fSummary').value,
     body: body,
     replyTo: $('fReplyTo').value || null,
+    outcome: $('fOutcomeRow').hidden ? null : $('fOutcome').value,
     needs: $('fNeeds').value,
     hopBudget: $('fHops').value || null,
     invocationCeiling: $('fCeiling').value || null,
@@ -640,6 +1191,7 @@ async function writeThen(run) {
         + 'Use <strong>Pick up pending work</strong> when you want it to run.</div>';
     }
   } catch (err) {
+    reportCaught(err, 'dashboard action');
     $('error').innerHTML = '<div class="banner">' + esc(err.message) + '</div>';
   }
 }
@@ -660,6 +1212,7 @@ $('btnKill').addEventListener('click', async function () {
     else await post('/api/stop', { reason: 'stopped from the dashboard' });
     await refresh();
   } catch (err) {
+    reportCaught(err, 'dashboard action');
     $('error').innerHTML = '<div class="banner">' + esc(err.message) + '</div>';
   }
 });
@@ -679,7 +1232,15 @@ $('btnKill').addEventListener('click', async function () {
   } catch (err) { /* the dashboard still works without it */ }
 })();
 
-refresh();
+// The vocabulary first: every renderer below reads it, and a menu built before it
+// arrives is an empty menu nobody notices is empty.
+loadMeta()
+  .then(function () { paintTypeMenu(); })
+  .catch(function (err) {
+    $('error').innerHTML = '<div class="banner">The dashboard could not read its own vocabulary: '
+      + esc(err.message) + '</div>';
+  })
+  .finally(refresh);
 </script>
 </body>
 </html>

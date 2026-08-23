@@ -65,7 +65,7 @@ directly, so the two need to agree.
 | Field | Required | What goes in it |
 |---|---|---|
 | `to` | yes | Who should act on this. One agent name, or several separated by `+`. Use `operator` for the human. |
-| `type` | yes | `request` if you are asking for work · `report` if you are only telling them · `decision` if something is settled and future work should not re-open it |
+| `type` | yes | `request` if you are asking for work · `report` if you are only telling them · `decision` if something is settled and future work should not re-open it · `information` if it is a fact worth keeping in their own notes for later |
 | `summary` | yes | One line. Any punctuation is fine — it is stored as data, not parsed. |
 | `replyTo` | no | Leave it out. You are starting something, not answering it. |
 | `outcome` | no | Leave it out. It belongs only on a `response` or `signoff`. |

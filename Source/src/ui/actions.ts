@@ -10,8 +10,15 @@
  * that it takes the lock in `runner.ts` and holds it across the whole loop rather
  * than one append.
  */
-import type { Config } from '../config/load.js';
+import type { Agent, Config } from '../config/load.js';
 import { unknownNames } from '../config/load.js';
+import { addAgent, removeAgent, updateAgent, RosterError } from '../roster/edit.js';
+import type { AgentPatch, AgentPathInput } from '../roster/edit.js';
+import { GRANT_FIELDS } from '../roster/edit.js';
+import { writeAgentSettings } from '../dispatch/invoke.js';
+import { installProtocol } from '../cli/protocol.js';
+import { installSkills } from '../cli/skills.js';
+import { ensureDir } from '../util/fsx.js';
 import { appendRow, initCommsRoot, layout } from '../ledger/store.js';
 import { MESSAGE_TYPES, OPERATOR, OUTCOMES } from '../ledger/row.js';
 import type { MessageType, Outcome } from '../ledger/row.js';
@@ -163,4 +170,186 @@ export async function clearKillSwitch(config: Config): Promise<string> {
   const file = layout(config).kill;
   await fsp.rm(file, { force: true });
   return file;
+}
+
+/**
+ * Roster edits from the dashboard.
+ *
+ * Thin on purpose. Every rule that decides whether an edit is allowed lives in
+ * `roster/edit.ts` alongside the one the CLI uses, so the two front-ends cannot
+ * come to different conclusions about a nesting rule; what is left here is turning
+ * loose JSON into the shapes that module expects, and turning its refusals into a
+ * 400 the operator can read.
+ *
+ * These change configuration, not the ledger, so they take no writer lock. The
+ * guard that matters is a different one and it lives in the server: a roster edit
+ * during a run would change the scoping of an agent already dispatched.
+ */
+
+function bool(v: unknown): boolean | undefined {
+  if (v === undefined) return undefined;
+  return v === true || v === 'true' || v === 'on' || v === 1;
+}
+
+function optionalNumber(v: unknown, field: string): number | null | undefined {
+  if (v === undefined) return undefined;
+  if (v === null || v === '') return null;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) throw new BadRequest(`${field} must be a positive number, or blank to use the default.`);
+  return n;
+}
+
+/**
+ * The path rows from the form.
+ *
+ * Accepts the objects the picker produces and also a plain newline-separated string,
+ * which is what the field degrades to if somebody pastes a list. Read defaults on:
+ * an entry with neither box ticked grants nothing and is dropped in cleanPaths, and
+ * silently dropping a directory somebody just added would look like the form losing
+ * it.
+ */
+function pathList(v: unknown): AgentPathInput[] {
+  if (typeof v === 'string') {
+    return v
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((path) => ({ path, read: true, write: false }));
+  }
+  if (!Array.isArray(v)) throw new BadRequest('paths must be a list of directories.');
+  return v.map((row) => {
+    if (typeof row === 'string') return { path: row, read: true, write: false };
+    const r = row as Record<string, unknown>;
+    return { path: String(r.path ?? ''), read: r.read !== false, write: r.write === true };
+  });
+}
+
+function stringList(v: unknown, field: string): string[] | undefined {
+  if (v === undefined) return undefined;
+  if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
+  if (typeof v === 'string') {
+    return v
+      .split(/[\r\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  throw new BadRequest(`${field} must be a list.`);
+}
+
+/** The editable half of a roster entry, read out of a form body. */
+export function agentPatchFrom(body: Record<string, unknown>): AgentPatch {
+  const patch: AgentPatch = {};
+  if (body.description !== undefined) patch.description = String(body.description);
+  if (body.model !== undefined) patch.model = String(body.model);
+  for (const flag of GRANT_FIELDS) {
+    const v = bool(body[flag]);
+    if (v !== undefined) patch[flag] = v;
+  }
+  if (body.paths !== undefined) patch.paths = pathList(body.paths);
+  const tools = stringList(body.tools, 'tools');
+  if (tools) patch.tools = tools;
+
+  const silence = optionalNumber(body.silenceTimeoutMs, 'silenceTimeoutMs');
+  if (silence !== undefined) patch.silenceTimeoutMs = silence;
+  const wall = optionalNumber(body.wallClockTimeoutMs, 'wallClockTimeoutMs');
+  if (wall !== undefined) patch.wallClockTimeoutMs = wall;
+  const budget = optionalNumber(body.maxBudgetUsd, 'maxBudgetUsd');
+  if (budget !== undefined) patch.maxBudgetUsd = budget;
+
+  return patch;
+}
+
+/**
+ * A refusal from the roster rules, flattened into one message.
+ *
+ * `RosterError` carries the reason *and* the requirement behind it — "nesting makes
+ * write scoping unenforceable (X4)" — and losing the details to a generic 400 would
+ * leave the operator with a rule and no argument for it.
+ */
+function asBadRequest(err: unknown): never {
+  if (err instanceof RosterError) {
+    throw new BadRequest([err.message, ...err.details].join(' '));
+  }
+  throw err;
+}
+
+export async function addRosterAgent(config: Config, body: Record<string, unknown>) {
+  const name = String(body.name ?? '').trim();
+  const home = String(body.home ?? '').trim();
+  if (!home) throw new BadRequest('A home directory is required. This tool registers directories that already exist.');
+
+  let change;
+  try {
+    change = await addAgent(config, { name, home, ...agentPatchFrom(body) });
+  } catch (err) {
+    asBadRequest(err);
+  }
+
+  // The two things this application owns inside an agent's home, written at
+  // registration exactly as `orchestrator agent add` writes them (L5, X6).
+  await ensureDir(change.agent.outbox);
+  await writeAgentSettings(change.config, change.agent);
+
+  const installed = bool(body.installProtocol)
+    ? await installAgentContract(change.config, change.agent)
+    : null;
+
+  return { ...change, installed };
+}
+
+export async function updateRosterAgent(config: Config, body: Record<string, unknown>) {
+  const name = String(body.name ?? '').trim();
+  if (!name) throw new BadRequest('Which agent?');
+
+  let change;
+  try {
+    change = await updateAgent(config, name, agentPatchFrom(body));
+  } catch (err) {
+    asBadRequest(err);
+  }
+
+  // Regenerated immediately rather than at the next dispatch. Dispatch rewrites this
+  // file anyway, but an operator who ticks a box and then reads the settings file
+  // should not be shown the answer from before they ticked it.
+  await writeAgentSettings(change.config, change.agent);
+  return change;
+}
+
+export async function removeRosterAgent(config: Config, body: Record<string, unknown>) {
+  const name = String(body.name ?? '').trim();
+  if (!name) throw new BadRequest('Which agent?');
+  try {
+    return await removeAgent(config, name);
+  } catch (err) {
+    asBadRequest(err);
+  }
+}
+
+/**
+ * The agent-side half of the contract: the protocol file, the CLAUDE.md pointer and
+ * the ledger skills.
+ *
+ * One action rather than three, for the reason `agent add --write-protocol` gives:
+ * they are installed together or one of them ends up not installed at all.
+ */
+export async function installAgentContract(config: Config, agent: Agent) {
+  const protocol = await installProtocol(agent, config.commsRoot);
+  const skills = await installSkills(agent);
+  return {
+    protocol: {
+      wroteFile: protocol.wroteFile,
+      wrotePointer: protocol.wrotePointer,
+      removedLegacy: protocol.removedLegacy,
+      claudeMdMissing: protocol.claudeMdMissing,
+      notes: protocol.notes,
+    },
+    skills: skills.map((s) => ({ name: s.name, wrote: s.wrote, updated: s.updated })),
+  };
+}
+
+export async function installContractFor(config: Config, body: Record<string, unknown>) {
+  const name = String(body.name ?? '').trim();
+  const agent = config.agents.find((a) => a.name.toLowerCase() === name.toLowerCase());
+  if (!agent) throw new BadRequest(`"${name}" is not in the roster.`);
+  return installAgentContract(config, agent);
 }

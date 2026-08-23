@@ -110,7 +110,7 @@ export async function dispatchOnce(
   const log = opts.onLog ?? (() => {});
   const agent = findAgent(config, agentName);
   if (!agent) {
-    return skip(agentName, `"${agentName}" is not in the roster. Adding an agent is a config entry plus a directory (P1).`);
+    return skip(agentName, `"${agentName}" is not in the roster. Register its directory on the Config tab, or with \`orchestrator agent add\`.`);
   }
 
   // P2 — "An agent whose directory the operator works in interactively must be
@@ -127,12 +127,12 @@ export async function dispatchOnce(
         status: 'manual-relay',
         invocationId: null,
         at: nowIso(),
-        note: 'agent is dispatch-excluded (P2)',
+        note: 'agent is excluded from dispatch',
       });
     }
     return skip(
       agent.name,
-      `"${agent.name}" is dispatch-excluded (P2). ${items.length} row(s) queued for manual relay — see \`orchestrator relay\`.`
+      `"${agent.name}" is excluded from dispatch. ${items.length} row(s) are queued for you to relay by hand — see \`orchestrator relay\`.`
     );
   }
 
@@ -267,7 +267,7 @@ export async function dispatchOnce(
   const after = await snapshot(agent);
   const skillsDiff = diffSnapshots(before, after);
   if (skillsDiff.any) {
-    log(`  D13: ${agent.name} changed its own skills/commands — ${describeDiff(skillsDiff)}`);
+    log(`  ${agent.name} changed its own skills or commands — ${describeDiff(skillsDiff)}`);
     await reportSkillsChange(config, agent, skillsDiff);
   }
 
@@ -319,7 +319,7 @@ export async function dispatchOnce(
     stopChain = true;
     const resets = rateLimitResetsAt(result.rateLimitEvent ?? result.rateLimitStatus);
     stopReason =
-      'A rate limit was recognised (V5). The chain is stopped and will not be retried into (V6).' +
+      'A rate limit was reported by the CLI. The chain is stopped here rather than dispatched into the same limit again.' +
       (resets ? ` The limit resets at ${resets}.` : '');
     await escalate(config, stopReason, batch.map((b) => b.row.id), rootIds[0] ?? null);
   }

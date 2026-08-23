@@ -31,7 +31,7 @@ wrong answer costs more than a refusal, because nobody catches it.
 ```markdown
 ---
 to: <recipient name, or several joined with +>
-type: request | response | report | signoff | decision
+type: request | response | report | signoff | decision | information
 replyTo: <the row ID you are answering, if any — e.g. 0002>
 outcome: done | deferred | rejected | blocked
 summary: One line saying what this is. Any punctuation is fine.
@@ -43,6 +43,9 @@ reads it next may be as cold as you were.
 
 - `outcome` is required on `response` and `signoff`, and must not appear on anything else.
 - `replyTo` is required whenever you are answering something.
+- An `information` message is delivered to whoever it is addressed to and stays open
+  until they reply. If one arrives for you, no work is being asked: record what is
+  worth recording in your own notes, then close it with a one-line `report`.
 - Leave `needs` out entirely unless the work is outward-facing, makes a checkable
   claim of fact, or crosses a publication boundary. Every name in it costs another
   agent a full invocation.
@@ -50,8 +53,29 @@ reads it next may be as cold as you were.
   it pass. A bare rejection is refused by the validator.
 
 Do not write the ledger index, do not write into another agent's directory, and do not
-write anything anywhere except that one file. The orchestrator assigns the message its
+write anything anywhere except those files. The orchestrator assigns the message its
 ID, timestamp and author — you do not supply them, and cannot.
+
+### When the work needs someone else
+
+Write **one request per agent you are asking**, each with `replyTo` set to the row you
+were given — not a new thread. Then **leave that row unanswered**.
+
+That is what keeps the work yours. The orchestrator sees your requests hanging below
+the row, so it will not invoke you again while they are outstanding, and when the last
+one is answered it hands you the whole thread — your instructions, your requests and
+every reply — so you can write the answer that closes it.
+
+Answering the row now is what breaks this. Any `response` closes it, including
+`outcome: deferred`, and the replies you asked for then arrive with nobody left to
+read them. `deferred` means *stop, come back to this deliberately*, not *I am waiting
+on other people*.
+
+To say what you have set in motion without closing anything, write a `report`. A
+report closes nothing.
+
+If sign-off is what you need rather than work, put the names in `needs` instead and
+answer normally — the row stays open until each one signs off.
 
 If your file is malformed the orchestrator rejects it before it reaches the ledger,
 preserves it, and sends you back a message naming exactly what was wrong. Nothing is
