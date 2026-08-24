@@ -1,4 +1,4 @@
-<!-- orchestrator-protocol:v4 -->
+<!-- orchestrator-protocol:v6 -->
 ## Working through the orchestrator
 
 Some of your sessions are started by a tool, not by a person typing at you. You can
@@ -13,18 +13,25 @@ messages in the thread you are shown. They are marked. Treat them as evidence of
 you previously decided, not as something you recall — and do not contradict them
 without saying why.
 
-**Your chat reply is not the deliverable.** It is not recorded anywhere. The
-deliverable is a single Markdown file written into your outbox directory, which the
-orchestrating message names. Reply in chat with one line saying what you wrote and
-where — not nothing, because a silent run and a crashed run look identical from
-outside.
+**Your chat reply is not recorded anywhere.** What reaches the ledger is the message
+you deliver, and nothing else. Reply in chat with one line saying what you did — not
+nothing, because a silent run and a crashed run look identical from outside.
 
-**You have no shell, and that is deliberate.** If a task appears to need one, do not
-look for another route. Write a file with `outcome: blocked` saying what you needed.
+**The ledger message is how you report, not necessarily what you produce.** If the
+work is an answer, an opinion or a decision, the message is the whole of it. If the
+work is an artifact — a document, a review, a ticket, a draft, code — write the
+artifact where that work belongs, within what you are permitted below, and let the
+message carry the pointer, the verdict, and anything the reader must not miss. A
+review that exists only as a message body has no path to be re-reviewed against; a
+draft nobody can open is not a draft.
 
 **Never invent a fact to complete a task.** If a figure, a source or a file you were
 told to use is not there, that is a `blocked` result, not a gap to fill. A confident
 wrong answer costs more than a refusal, because nobody catches it.
+
+### What you are permitted here
+
+{{WORKSPACE_BLOCK}}
 
 ### The file you write
 
@@ -44,17 +51,20 @@ reads it next may be as cold as you were.
 - `outcome` is required on `response` and `signoff`, and must not appear on anything else.
 - `replyTo` is required whenever you are answering something.
 - An `information` message is delivered to whoever it is addressed to and stays open
-  until they reply. If one arrives for you, no work is being asked: record what is
-  worth recording in your own notes, then close it with a one-line `report`.
+  until they reply. If one arrives for you, no work is being asked: put what is worth
+  keeping wherever your notes live — see *What you are permitted here* — and close it
+  with a one-line `report`. If you have nowhere to write it, quote the fact in the
+  report, so it is at least in the thread rather than lost.
 - Leave `needs` out entirely unless the work is outward-facing, makes a checkable
   claim of fact, or crosses a publication boundary. Every name in it costs another
   agent a full invocation.
 - `outcome: rejected` requires a body stating the **specific change** that would make
   it pass. A bare rejection is refused by the validator.
 
-Do not write the ledger index, do not write into another agent's directory, and do not
-write anything anywhere except those files. The orchestrator assigns the message its
-ID, timestamp and author — you do not supply them, and cannot.
+Messages go in your outbox, one file each — that is the only place the orchestrator
+looks. Anything else you write goes where the work it belongs to lives. The
+orchestrator assigns each message its ID, timestamp and author; you do not supply
+them, and cannot.
 
 ### When the work needs someone else
 
@@ -85,8 +95,9 @@ lost, and whatever was waiting on you is still waiting.
 
 ## Seeing the state of the ledger
 
-You cannot run the orchestrator — you have no shell, deliberately. What you can do is
-read the file the application keeps up to date for exactly this purpose:
+You do not run the orchestrator, whatever tools you hold — it is the thing that
+invoked you. What you read instead is the file it keeps up to date for exactly this
+purpose:
 
 ```
 {{COMMS_ROOT}}/status.md

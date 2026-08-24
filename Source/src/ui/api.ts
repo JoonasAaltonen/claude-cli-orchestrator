@@ -212,7 +212,7 @@ export async function threadPayload(config: Config, id: string) {
 export async function agentsPayload(config: Config) {
   const out = [];
   for (const a of config.agents) {
-    const p = await protocolStatus(a, config.commsRoot);
+    const p = await protocolStatus(a, config);
     const s = await skillStatus(a);
     out.push({
       name: a.name,

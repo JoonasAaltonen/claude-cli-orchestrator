@@ -19,6 +19,7 @@ import { loadConfig, repoRoot } from '../config/load.js';
 import type { Agent, Config } from '../config/load.js';
 import { NAME_PATTERN, OPERATOR, ORCHESTRATOR } from '../ledger/row.js';
 import { canonical, isWithin, longPathWarning } from '../util/paths.js';
+import { deadWriteGrants } from '../dispatch/permissions.js';
 import { exists, readTextIfExists, writeText } from '../util/fsx.js';
 
 /**
@@ -345,6 +346,12 @@ function cleanPaths(values: readonly AgentPathInput[]): { path: string; read: bo
  */
 export function pathWarnings(config: Config, entries: readonly { path: string; write: boolean }[], self?: string): string[] {
   const notes: string[] = [];
+
+  // First, and phrased as a defect rather than a risk, because it is the one thing
+  // here that does not do what the operator asked. Everything below is a boundary
+  // being widened on purpose; this is a grant that silently will not work.
+  for (const dead of deadWriteGrants(config, entries)) notes.push(dead.why);
+
   for (const e of entries) {
     if (!e.write) continue;
     if (isWithin(e.path, config.commsRoot) || isWithin(config.commsRoot, e.path)) {

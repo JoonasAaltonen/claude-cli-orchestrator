@@ -30,6 +30,7 @@ import { readText, readTextIfExists } from '../util/fsx.js';
 import { refTo } from '../util/paths.js';
 import { MCP_TOOL_ID, SKILL_COMMAND, installedSkillPath } from '../contract/names.js';
 import { exists } from '../util/fsx.js';
+import { describeWorkspace } from './permissions.js';
 
 export interface PromptInputs {
   agent: Agent;
@@ -80,6 +81,7 @@ export async function buildPrompt(config: Config, inputs: PromptInputs): Promise
       ? `Call \`${MCP_TOOL_ID}\` with your message.`
       : `Write **one** file into \`${agent.outbox}\`.`,
     COMMS_ROOT: config.commsRoot,
+    WORKSPACE_BLOCK: describeWorkspace(config, agent),
     PARTICIPANTS: participants.join(' · '),
     ROSTER_BLOCK: buildRosterBlock(config, participants, agent),
     REPLY_TO_HINT: replyToHint,
@@ -396,9 +398,39 @@ function indent(s: string): string {
     .join('\n');
 }
 
-function fill(template: string, vars: Record<string, string>): string {
+/**
+ * Every substitution the builder makes, named once.
+ *
+ * `fill` takes a complete `Record<PromptPlaceholder, string>`, so this list and the
+ * object built in `buildPrompt` cannot drift: a name here with nothing supplying it
+ * fails the build, and a value supplied under a name not here fails it too. Before
+ * that, `unknownPlaceholders` held a second copy of the list by hand, and the copy
+ * was what `doctor` checked the template against — so adding a placeholder to both
+ * the template and the builder made a correct template report as broken.
+ */
+export const PROMPT_PLACEHOLDERS = [
+  'AGENT_NAME',
+  'OUTBOX',
+  'COMMS_ROOT',
+  'WORKSPACE_BLOCK',
+  'PARTICIPANTS',
+  'ROSTER_BLOCK',
+  'REPLY_TO_HINT',
+  'REPLY_TO_ID_HINT',
+  'THREAD_BLOCK',
+  'PENDING_BLOCK',
+  'DECISIONS_BLOCK',
+  'HOPS_REMAINING',
+  'INVOCATIONS_REMAINING',
+  'DELIVERY_BLOCK',
+  'DELIVERY_STEP',
+] as const;
+
+export type PromptPlaceholder = (typeof PROMPT_PLACEHOLDERS)[number];
+
+function fill(template: string, vars: Record<PromptPlaceholder, string>): string {
   return template.replace(/\{\{([A-Z_]+)\}\}/g, (whole, key: string) => {
-    const v = vars[key];
+    const v = (vars as Record<string, string>)[key];
     if (v === undefined) {
       // D8's point: when the template is wrong every agent misbehaves identically.
       // An unfilled placeholder is left visible rather than blanked, so it shows up
@@ -411,12 +443,7 @@ function fill(template: string, vars: Record<string, string>): string {
 
 /** Placeholders the template uses that the builder does not supply. Checked by `doctor`. */
 export function unknownPlaceholders(template: string): string[] {
-  const known = new Set([
-    'AGENT_NAME', 'OUTBOX', 'COMMS_ROOT', 'PARTICIPANTS', 'REPLY_TO_HINT',
-    'REPLY_TO_ID_HINT', 'THREAD_BLOCK', 'PENDING_BLOCK', 'DECISIONS_BLOCK',
-    'HOPS_REMAINING', 'INVOCATIONS_REMAINING', 'ROSTER_BLOCK',
-    'DELIVERY_BLOCK', 'DELIVERY_STEP',
-  ]);
+  const known = new Set<string>(PROMPT_PLACEHOLDERS);
   const found = new Set<string>();
   for (const m of template.matchAll(/\{\{([A-Z_]+)\}\}/g)) {
     const k = m[1]!;

@@ -5,16 +5,25 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPermissionPlan, SHELL_TOOLS, rulePath } from '../src/dispatch/permissions.js';
+import { buildPermissionPlan, deadWriteGrants, SHELL_TOOLS, rulePath } from '../src/dispatch/permissions.js';
 import { buildArgv, FORBIDDEN_FLAGS } from '../src/dispatch/invoke.js';
 import type { Config, Agent } from '../src/config/load.js';
 import { MCP_TOOL_ID, SKILL_NAME, SKILL_COMMAND } from '../src/contract/names.js';
 import { mcpConfigPathFor } from '../src/mcp/config.js';
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { SKILLS } from '../src/contract/names.js';
-import { PROTOCOL_VERSION, renderProtocol } from '../src/cli/protocol.js';
+import {
+  PROTOCOL_VERSION,
+  historicPointerBlocks,
+  installProtocol,
+  pointerBlock,
+  protocolStatus,
+  renderProtocol,
+  templatePath,
+} from '../src/cli/protocol.js';
 
 function agent(over: Partial<Agent> = {}): Agent {
   const home = 'C:\\YourDirectory\\agents\\worker';
@@ -173,6 +182,86 @@ test('X4: a read-only path is deny-write; the same path with write ticked is gra
     p2.settings.permissions.allow.includes(`Read(${rulePath(DOCS, '/**')})`),
     'write implies read — the filesystem offers no other arrangement'
   );
+});
+
+test('X4: a writable subdirectory of a read-only path is dead, and is reported as dead', () => {
+  // The shape an operator reaches for to avoid ticking every subfolder: read the
+  // whole tree, write one directory inside it. The rule language cannot express it —
+  // the read-only parent's deny covers the child and a deny beats an allow — so the
+  // requirement is that nobody is allowed to believe it worked.
+  const SITE = 'C:\\YourDirectory\\site';
+  const ISSUES = 'C:\\YourDirectory\\site\\Issues';
+  const a = agent({
+    paths: [
+      { path: SITE, read: true, write: false },
+      { path: ISSUES, read: true, write: true },
+    ],
+  });
+  const c = config([a]);
+
+  const plan = buildPermissionPlan(c, a);
+  assert.ok(
+    plan.settings.permissions.deny.includes(`Write(${rulePath(SITE, '/**')})`),
+    'the read-only parent still denies — that half is correct and is the boundary'
+  );
+
+  const dead = deadWriteGrants(c, a.paths);
+  assert.equal(dead.length, 1, 'exactly the one grant that does not take effect');
+  assert.equal(dead[0]!.path, ISSUES);
+  assert.match(dead[0]!.why, /deny beats an allow/);
+  assert.match(dead[0]!.why, /YourDirectory.site"/, 'it names the grant to remove, not just the symptom');
+
+  assert.ok(
+    plan.rationale.some((r) => r.what.includes('DOES NOT HOLD') && r.what.includes(ISSUES)),
+    'the dry run and the dashboard both read the rationale, so it has to be in there'
+  );
+});
+
+test('X4: the reverse nesting is a deliberate narrowing and is not reported', () => {
+  // Read-only *inside* writable is the case deny-precedence gets right. Warning
+  // about it would train the operator to ignore the warning that matters.
+  const SITE = 'C:\\YourDirectory\\site';
+  const SECRETS = 'C:\\YourDirectory\\site\\secrets';
+  const a = agent({
+    paths: [
+      { path: SITE, read: true, write: true },
+      { path: SECRETS, read: true, write: false },
+    ],
+  });
+  const c = config([a]);
+  assert.deepEqual(deadWriteGrants(c, a.paths), []);
+  assert.ok(
+    buildPermissionPlan(c, a).settings.permissions.deny.includes(`Write(${rulePath(SECRETS, '/**')})`),
+    'and it genuinely narrows'
+  );
+});
+
+test('a write grant inside the comms root is reported as dead, because T6 is unconditional', () => {
+  const a = agent({ paths: [{ path: 'C:\\YourDirectory\\claude-comms\\messages', read: true, write: true }] });
+  const c = config([a]);
+  const dead = deadWriteGrants(c, a.paths);
+  assert.equal(dead.length, 1);
+  assert.match(dead[0]!.why, /comms root/);
+});
+
+test('X2: an allowed shell is granted by name, or `dontAsk` refuses it on first use', () => {
+  // The failure this exists for: Bash appeared in the agent's tool list, the agent
+  // reported having a shell, and the first command was refused because no allow rule
+  // matched it. An agent refused mid-task reports the task as impossible.
+  const off = agent();
+  const planOff = buildPermissionPlan(config([off]), off);
+  for (const t of SHELL_TOOLS) {
+    assert.ok(planOff.settings.permissions.deny.includes(t), `${t} denied when the shell is off`);
+    assert.ok(!planOff.settings.permissions.allow.includes(t));
+  }
+
+  const on = agent({ shellAllowed: true });
+  const planOn = buildPermissionPlan(config([on]), on);
+  for (const t of SHELL_TOOLS) {
+    assert.ok(planOn.settings.permissions.allow.includes(t), `${t} allowed by name when the shell is on`);
+    assert.ok(!planOn.settings.permissions.deny.includes(t), 'and not also denied');
+  }
+  assert.ok(planOn.tools.includes('Bash'), 'and present in the built-in set it may draw from');
 });
 
 test('X5/F2: no context-stripping flag is ever built into argv', () => {
@@ -344,9 +433,191 @@ test('the protocol version constant matches the shipped template', async () => {
 });
 
 test('the protocol names the comms root, so an agent can find status.md', async () => {
-  const rendered = await renderProtocol('C:\\YourDirectory\\claude-comms');
+  const a = agent();
+  const rendered = await renderProtocol(config([a]), a);
   assert.match(rendered, /C:\/YourDirectory\/claude-comms\/status\.md/);
   assert.doesNotMatch(rendered, /\{\{COMMS_ROOT\}\}/, 'every placeholder must be filled');
-  // T5: forward slashes, because this goes into prose an agent may quote back.
-  assert.doesNotMatch(rendered, /C:\\YourDirectory/);
+  assert.doesNotMatch(rendered, /\{\{WORKSPACE_BLOCK\}\}/, 'every placeholder must be filled');
+});
+
+test('the previous pointer wording is frozen, not regenerated from the current one', () => {
+  // The mistake this guards: the old blocks were generated from the live body with
+  // only the marker swapped. It looks like deduplication and it is, right until the
+  // wording changes — then every "historic" block silently becomes the new text,
+  // matches nothing on any agent's disk, and the upgrade reports the operator's own
+  // CLAUDE.md as hand-edited. So the previous body must differ from the current one.
+  const historic = historicPointerBlocks();
+  assert.ok(historic.length > 0, 'an upgrade needs something to recognise');
+
+  const bodyOf = (b: string) => b.split('\n').slice(1).join('\n');
+  const current = bodyOf(pointerBlock());
+  for (const b of historic) {
+    assert.notEqual(
+      bodyOf(b),
+      current,
+      'a frozen body equals the current one — it was probably generated from it'
+    );
+  }
+
+  // Pinned against what was read back off a live agent at v5.
+  const v5 = historic.find((b) => b.startsWith('<!-- orchestrator-protocol-ref:v5 -->'));
+  assert.ok(v5, 'v5 is installed on real agents and must stay recognisable');
+  assert.ok(
+    v5.endsWith('You can leave them a message with the `/ledger-note` skill.\nAsk me first.'),
+    'the v5 block must end exactly as it was installed, "Ask me first." included'
+  );
+
+  // The current version is what an upgrade writes, never what it looks for.
+  assert.ok(!historic.some((b) => b.includes(`orchestrator-protocol-ref:${PROTOCOL_VERSION}`)));
+  assert.match(pointerBlock(), new RegExp(`orchestrator-protocol-ref:${PROTOCOL_VERSION}\\b`));
+});
+
+/** An agent home with a CLAUDE.md, for the install paths. */
+async function agentWithClaudeMd(claudeMd: string): Promise<{ a: Agent; c: Config; file: string }> {
+  const base = await mkdtemp(path.join(os.tmpdir(), 'orch-protocol-'));
+  const home = path.join(base, 'agent');
+  await mkdir(path.join(home, '.claude'), { recursive: true });
+  const file = path.join(home, 'CLAUDE.md');
+  await writeFile(file, claudeMd, 'utf8');
+  const a = agent({ name: 'installed', home, outbox: path.join(home, 'outbox') });
+  return { a, c: config([a]), file };
+}
+
+test('a pointer still verbatim from an older version is upgraded in place', async () => {
+  // The ordinary update path, and the one that has to keep working: the operator's own
+  // sections stay exactly where they are and only the block between them moves version.
+  const old = historicPointerBlocks().find((b) =>
+    b.startsWith(`<!-- orchestrator-protocol-ref:v${Number(PROTOCOL_VERSION.slice(1)) - 1} -->`)
+  );
+  assert.ok(old, 'the immediately previous version must be recognisable');
+
+  const { a, c, file } = await agentWithClaudeMd(`# Agent\n\nMine.\n\n${old}\n\n## Shared documents\n\nAlso mine.\n`);
+  const r = await installProtocol(a, c);
+  assert.equal(r.wrotePointer, true);
+  assert.equal(r.forced, false);
+
+  const after = await readFile(file, 'utf8');
+  assert.ok(after.includes(pointerBlock()), 'the current block replaces the old one');
+  assert.ok(!after.includes(old), 'and the old one is gone, not duplicated');
+  assert.ok(after.startsWith('# Agent\n\nMine.'), "the operator's text above survives");
+  assert.ok(after.includes('## Shared documents'), "and below");
+  assert.equal((await protocolStatus(a, c)).ok, true);
+
+  await rm(path.dirname(a.home), { recursive: true, force: true });
+});
+
+test('an edited pointer is declined without --force, and appended beside with it', async () => {
+  // COO's case, reduced: a block this application wrote, then reworded by hand. There
+  // is no text to match and no safe way to find where it ends, so the choice is to
+  // decline or to add beside — never to guess the boundaries.
+  const edited = historicPointerBlocks()
+    .find((b) => b.startsWith('<!-- orchestrator-protocol-ref:v5 -->'))!
+    .replace('In an ordinary session like this one,', 'In an ordinary interactive session,');
+  const original = `# Agent\n\nMine.\n\n${edited}\n\n## Shared documents\n\nAlso mine.\n`;
+  const { a, c, file } = await agentWithClaudeMd(original);
+
+  const s = await protocolStatus(a, c);
+  assert.equal(s.pointerPresent, true);
+  assert.equal(s.pointerEdited, true, 'it matches neither the current text nor any past one');
+  assert.equal(s.pointerUpgradable, false);
+  assert.equal(s.ok, false);
+
+  const declined = await installProtocol(a, c);
+  assert.equal(declined.wrotePointer, false);
+  assert.equal(await readFile(file, 'utf8'), original, 'declining must not touch the file');
+  assert.match(declined.notes.join('\n'), /has been edited since it was written/);
+
+  const forced = await installProtocol(a, c, { force: true });
+  assert.equal(forced.forced, true);
+  const after = await readFile(file, 'utf8');
+  assert.ok(after.includes(edited), 'the edited block survives verbatim — that was the promise');
+  assert.ok(after.includes('## Shared documents'), "the operator's own sections survive");
+  assert.ok(after.trimEnd().endsWith(pointerBlock()), 'and a current block follows at the end');
+  assert.match(forced.notes.join('\n'), /delete the old one by hand/);
+
+  // Idempotent: the second forced run finds its own block verbatim and adds nothing.
+  const again = await installProtocol(a, c, { force: true });
+  assert.equal(again.wrotePointer, false);
+  assert.equal(await readFile(file, 'utf8'), after);
+
+  await rm(path.dirname(a.home), { recursive: true, force: true });
+});
+
+test('a pointer edited under a current marker is not mistaken for installed', async () => {
+  // The report that started this: the wording was changed, the version was not, and
+  // `--install` said "already current" and did nothing. Presence of the right marker is
+  // not the test — the block has to be the text this application writes.
+  const { a, c } = await agentWithClaudeMd(
+    `# Agent\n\n${pointerBlock().replace('Some sessions are started', 'Some sessions here are started')}\n`
+  );
+  const s = await protocolStatus(a, c);
+  assert.equal(s.pointerVersion, PROTOCOL_VERSION);
+  assert.equal(s.pointerStale, false, 'the marker really is current');
+  assert.equal(s.pointerEdited, true, 'but the text is not, and that has to show');
+  assert.equal(s.ok, false);
+
+  await rm(path.dirname(a.home), { recursive: true, force: true });
+});
+
+test('no shipped template states a capability — capabilities differ per agent', async () => {
+  // The defect this guards: `agent-protocol.md` was installed byte-identical into
+  // five directories asserting "you have no shell, and that is deliberate" and "do
+  // not write anything anywhere except that one file", while the roster had granted
+  // one of them a shell and all five of them write access. Agents believed the
+  // document over their own tool list and reported their work as impossible.
+  //
+  // A phrase list is a blunt instrument, and it is the right one here: the failure
+  // mode is somebody writing a confident sentence about tools into a file that
+  // cannot know which agent will read it.
+  const banned = [
+    /you have no shell/i,
+    /except (that|those) one file/i,
+    /except those files/i,
+    /you cannot run the orchestrator/i,
+  ];
+  for (const file of [templatePath(), path.join(path.dirname(templatePath()), 'prompt', 'v1.md')]) {
+    const text = await readFile(file, 'utf8');
+    for (const phrase of banned) {
+      assert.doesNotMatch(text, phrase, `${path.basename(file)} states a capability it cannot know`);
+    }
+  }
+});
+
+test('two agents in one roster get materially different protocol files', async () => {
+  const plain = agent({ name: 'plain' });
+  const armed = agent({
+    name: 'armed',
+    home: 'C:\\YourDirectory\\agents\\armed',
+    outbox: 'C:\\YourDirectory\\agents\\armed\\outbox',
+    shellAllowed: true,
+    tools: ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'TodoWrite', 'WebSearch', 'WebFetch'],
+    paths: [{ path: 'C:\\YourDirectory\\shared', read: true, write: true }],
+  });
+  const c = config([plain, armed]);
+
+  const a = await renderProtocol(c, plain);
+  const b = await renderProtocol(c, armed);
+  assert.notEqual(a, b, 'one file for every agent is what caused this');
+
+  assert.match(a, /\*\*A shell:\*\* no/);
+  assert.match(b, /\*\*A shell:\*\* yes/);
+  assert.match(a, /\*\*The network:\*\* no/);
+  assert.match(b, /WebSearch and WebFetch/);
+  assert.match(b, /YourDirectory.shared/, 'a granted path is named, so the agent knows it has it');
+  assert.doesNotMatch(a, /YourDirectory.shared/, 'and an agent without it is not told it has it');
+});
+
+test('a write grant that does not take effect is never promised to the agent', async () => {
+  // The two fixes meeting: a dead grant is reported to the operator and withheld
+  // from the agent. Telling an agent it may write where it will be refused is the
+  // failure this whole pass exists to remove.
+  const a = agent({
+    paths: [
+      { path: 'C:\\YourDirectory\\site', read: true, write: false },
+      { path: 'C:\\YourDirectory\\site\\Issues', read: true, write: true },
+    ],
+  });
+  const rendered = await renderProtocol(config([a]), a);
+  const writeLine = rendered.split('\n').find((l) => l.startsWith('- **Write:**'))!;
+  assert.doesNotMatch(writeLine, /Issues/, 'the dead grant must not appear as a write it has');
 });

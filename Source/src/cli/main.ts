@@ -183,10 +183,12 @@ agentCmd
   .argument('[name]', 'an agent to inspect or install into; omit to print the text')
   .option('--install', 'write the protocol file into the agent directory and point CLAUDE.md at it')
   .option('--all', 'apply to every agent in the roster — the update path after pulling a new version')
+  .option('--force', 'when a pointer has been edited by hand, append a current one beside it rather than declining')
   .action(async (name: string | undefined, opts) => {
     process.exitCode = await runAgentProtocol(await cfg(), name, {
       install: !!opts.install,
       all: !!opts.all,
+      force: !!opts.force,
     });
   });
 

@@ -22,7 +22,7 @@ import type { GrantField } from '../roster/edit.js';
 import { ensureDir } from '../util/fsx.js';
 import { bold, dim, green, red, yellow, heading } from './render.js';
 
-import { installProtocol, protocolStatus, readTemplate, PROTOCOL_REL } from './protocol.js';
+import { installProtocol, protocolStatus, readTemplate, PROTOCOL_REL, PROTOCOL_VERSION } from './protocol.js';
 import { installSkills, skillStatus, skillRel, SKILL_COMMAND, NOTE_SKILL_COMMAND } from './skills.js';
 
 export interface AddOptions {
@@ -88,11 +88,11 @@ export async function runAgentAdd(config: Config, opts: AddOptions): Promise<num
 
   // The protocol: a file this application owns, plus one line in CLAUDE.md pointing
   // at it. See protocol.ts for why it is not appended or imported.
-  const status = await protocolStatus(agent, config.commsRoot);
+  const status = await protocolStatus(agent, config);
   if (status.ok) {
     console.log(`  ${green('ok')} protocol already installed (${status.fileVersion ?? 'unversioned'})`);
   } else if (opts.writeProtocol) {
-    const r = await installProtocol(agent, config.commsRoot);
+    const r = await installProtocol(agent, config);
     if (r.wroteFile) console.log(`  ${green('wrote')}   ${PROTOCOL_REL.replace(/\\/g, '/')}`);
     if (r.wrotePointer) console.log(`  ${green('added')}   a one-line pointer to CLAUDE.md`);
     for (const note of r.notes) console.log(dim(`  ${note}`));
@@ -201,12 +201,23 @@ export async function runAgentList(config: Config): Promise<number> {
     console.log(dim(`     ${a.home}`));
     if (a.description) console.log(dim(`     ${a.description}`));
 
-    const status = await protocolStatus(a, config.commsRoot);
+    const status = await protocolStatus(a, config);
     if (!status.claudeMdPresent) console.log(`     ${red('no CLAUDE.md')} ${dim('(X5)')}`);
     else if (status.legacyInline) {
       console.log(`     ${yellow('protocol is pasted into CLAUDE.md')} ${dim(`— orchestrator agent protocol ${a.name} --install  moves it to a file`)}`);
     } else if (!status.ok) {
-      console.log(`     ${yellow('protocol not installed')} ${dim(`— orchestrator agent protocol ${a.name} --install`)}`);
+      // Which half is wrong, rather than one label for four different states. "not
+      // installed" was printed for an agent whose protocol file was present and
+      // current and whose CLAUDE.md had simply been rewritten by hand — the operator
+      // reads that as "the install failed" and reinstalls over their own text.
+      const why = !status.fileInstalled
+        ? 'protocol file missing'
+        : status.fileStale
+          ? `protocol file is out of date (${status.fileVersion ?? 'unversioned'} on disk)`
+          : !status.pointerPresent
+            ? 'nothing in CLAUDE.md points at the protocol file'
+            : `CLAUDE.md pointer is ${status.pointerVersion ?? 'unversioned'}, current is ${PROTOCOL_VERSION}`;
+      console.log(`     ${yellow(why)} ${dim(`— orchestrator agent protocol ${a.name} --install`)}`);
     } else {
       console.log(dim(`     protocol ${status.fileVersion ?? 'installed'}`));
     }
@@ -235,8 +246,13 @@ export async function runAgentRemove(config: Config, name: string): Promise<numb
 export async function runAgentProtocol(
   config: Config,
   name: string | undefined,
-  opts: { install: boolean; all: boolean }
+  opts: { install: boolean; all: boolean; force?: boolean }
 ): Promise<number> {
+  if (opts.force && !opts.install) {
+    console.error(red('--force only means anything with --install.'));
+    return 2;
+  }
+
   // No target: print it. The portable path — paste it anywhere, including into an
   // agent this installation does not manage.
   if (!name && !opts.all) {
@@ -256,12 +272,30 @@ export async function runAgentProtocol(
   if (!opts.install) {
     // A named agent without --install: show where it stands rather than guessing.
     for (const agent of targets) {
-      const s = await protocolStatus(agent, config.commsRoot);
+      const s = await protocolStatus(agent, config);
       console.log(`${bold(agent.name)} ${dim(agent.home)}`);
       console.log(`  file    ${s.fileInstalled ? green(s.fileVersion ?? 'installed') : red('not installed')} ${dim(PROTOCOL_REL.replace(/\\/g, '/'))}`);
-      console.log(`  pointer ${s.pointerPresent ? green('present in CLAUDE.md') : s.claudeMdPresent ? red('missing') : red('no CLAUDE.md')}`);
+      // The version, not just the presence of a marker. This line used to print a
+      // green "present in CLAUDE.md" for a v4 pointer under a v5 installation, which
+      // reads as nothing to do — and then offered a fix that declined to act.
+      console.log(
+        `  pointer ${
+          !s.claudeMdPresent
+            ? red('no CLAUDE.md')
+            : !s.pointerPresent
+              ? red('missing')
+              : s.pointerStale
+                ? yellow(`${s.pointerVersion ?? 'unversioned'}, current is ${PROTOCOL_VERSION}`)
+                : green(`${s.pointerVersion ?? 'present'} in CLAUDE.md`)
+        }`
+      );
       if (s.legacyInline) console.log(`  ${yellow('the protocol text is pasted into CLAUDE.md; --install moves it to the file')}`);
-      if (!s.ok) console.log(dim(`  fix: orchestrator agent protocol ${agent.name} --install`));
+      if (s.pointerEdited) {
+        console.log(`  ${yellow('that pointer has been edited since it was written, so --install will not touch it')}`);
+        console.log(dim(`  fix: orchestrator agent protocol ${agent.name} --install --force`));
+      } else if (!s.ok) {
+        console.log(dim(`  fix: orchestrator agent protocol ${agent.name} --install`));
+      }
     }
     console.log(dim('\nRun with --install to write it, or with no agent name to print the text.'));
     return 0;
@@ -272,10 +306,10 @@ export async function runAgentProtocol(
   // because this application owns it; CLAUDE.md only ever gains one line.
   let failures = 0;
   for (const agent of targets) {
-    const r = await installProtocol(agent, config.commsRoot);
+    const r = await installProtocol(agent, config, { force: opts.force });
     const bits: string[] = [];
     if (r.wroteFile) bits.push(r.fileWasUpdated ? 'file updated' : 'file written');
-    if (r.wrotePointer) bits.push('pointer added to CLAUDE.md');
+    if (r.wrotePointer) bits.push(r.forced ? 'pointer appended to CLAUDE.md' : 'pointer added to CLAUDE.md');
     if (r.removedLegacy) bits.push('inline copy removed');
     console.log(`${r.claudeMdMissing ? yellow('partial') : green('ok')}  ${bold(agent.name)} ${dim(bits.join(', ') || 'already current')}`);
     for (const note of r.notes) console.log(dim(`     ${note}`));

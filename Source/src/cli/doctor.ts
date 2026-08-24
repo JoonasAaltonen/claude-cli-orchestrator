@@ -30,6 +30,7 @@ import { nowIso } from '../util/time.js';
 import { dim, green, red, yellow, heading } from './render.js';
 import { skillStatus, dispatchSkill } from './skills.js';
 import { serverCommand } from '../mcp/config.js';
+import { deadWriteGrants } from '../dispatch/permissions.js';
 import { MCP_TOOL_ID, SKILL_COMMAND } from '../contract/names.js';
 
 type Level = 'ok' | 'warn' | 'fail';
@@ -325,6 +326,18 @@ async function checkRoster(config: Config, findings: Finding[], fix: boolean): P
     }
 
     if (a.hasPermissionHooks !== audit.found) changed = true;
+
+    // A grant the operator made that the permission layer cannot honour. Reported
+    // as a failure rather than a warning: unlike everything else here it is not a
+    // risk being taken deliberately, it is the roster saying one thing and the
+    // generated rules doing another, and the agent finds out mid-invocation.
+    for (const dead of deadWriteGrants(config, a.paths)) {
+      report(findings, {
+        level: 'fail',
+        what: `${a.name}: the write grant on ${dead.path} does not take effect (X4)`,
+        detail: dead.why,
+      });
+    }
 
     // X1/X3a — the two requirements that hold each other up.
     if (a.shellAllowed) {

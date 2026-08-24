@@ -333,7 +333,7 @@ export async function removeRosterAgent(config: Config, body: Record<string, unk
  * they are installed together or one of them ends up not installed at all.
  */
 export async function installAgentContract(config: Config, agent: Agent) {
-  const protocol = await installProtocol(agent, config.commsRoot);
+  const protocol = await installProtocol(agent, config);
   const skills = await installSkills(agent);
   return {
     protocol: {

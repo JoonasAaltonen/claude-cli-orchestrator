@@ -19,8 +19,9 @@
  * whole file this application owns, so a new version is a copy, not a merge.
  */
 import path from 'node:path';
-import type { Agent } from '../config/load.js';
+import type { Agent, Config } from '../config/load.js';
 import { appRoot } from '../config/load.js';
+import { describeWorkspace } from '../dispatch/permissions.js';
 import { readText, readTextIfExists, writeText } from '../util/fsx.js';
 
 /**
@@ -29,7 +30,7 @@ import { readText, readTextIfExists, writeText } from '../util/fsx.js';
  * a mismatch cannot hide: the template's marker and this constant are asserted equal
  * in the tests, which is how a content bump that forgot the pointer was caught.
  */
-export const PROTOCOL_VERSION = 'v4';
+export const PROTOCOL_VERSION = 'v6';
 
 /** Marks the pointer line inside an agent's CLAUDE.md. */
 const POINTER_MARKER = 'orchestrator-protocol-ref';
@@ -38,6 +39,9 @@ const CONTENT_MARKER = 'orchestrator-protocol:';
 
 /** Where the protocol file is installed, relative to the agent's home. */
 export const PROTOCOL_REL = path.join('.claude', 'orchestrator-protocol.md');
+
+/** The same path as the agent reads it: prose, so forward slashes (T5). */
+const POINTER_REL = PROTOCOL_REL.replace(/\\/g, '/');
 
 export function templatePath(): string {
   return path.join(appRoot(), 'templates', 'agent-protocol.md');
@@ -52,87 +56,109 @@ export function readTemplate(): Promise<string> {
 }
 
 /**
- * The protocol as it is installed, with this installation's paths filled in.
+ * The protocol as it is installed — per installation, and per agent.
  *
- * The comms root is the one thing in it that cannot be written once and shipped: an
- * agent needs the absolute path to read `status.md`, and in an ordinary session
- * nothing else tells it where that is. Substituting here keeps it out of the agent's
- * CLAUDE.md and out of every prompt, while still being somewhere the agent can look.
+ * Two substitutions, for two different reasons.
  *
- * Every reader goes through this, so a stale-file comparison compares like with like.
+ * The comms root cannot be written once and shipped: an agent needs the absolute
+ * path to read `status.md`, and in an ordinary session nothing else tells it where
+ * that is. Substituting here keeps it out of the agent's CLAUDE.md and out of every
+ * prompt, while still being somewhere the agent can look.
+ *
+ * The workspace block cannot be shipped at all. It is what this agent may read,
+ * write and reach, and it differs between two agents in the same roster — see
+ * `describeWorkspace`, which is generated from the same roster entry the permission
+ * plan is. Before it existed, the shipped text asserted one answer for all of them
+ * and was wrong for most.
+ *
+ * That makes the installed file agent-specific, which is exactly what the staleness
+ * check wants: it renders for the same agent it is comparing against, so an agent
+ * whose grants have changed is correctly reported as needing a new copy.
  */
-export async function renderProtocol(commsRoot: string): Promise<string> {
+export async function renderProtocol(config: Config, agent: Agent): Promise<string> {
   const template = await readTemplate();
-  // Forward slashes: the value is going into prose an agent will read and may quote
-  // back at a tool, and a Windows path with single backslashes is the one form that
-  // breaks on the way through (T5).
-  return template.replace(/\{\{COMMS_ROOT\}\}/g, commsRoot.replace(/\\/g, '/'));
+  return template
+    // Forward slashes: the value is going into prose an agent will read and may quote
+    // back at a tool, and a Windows path with single backslashes is the one form that
+    // breaks on the way through (T5).
+    .replace(/\{\{COMMS_ROOT\}\}/g, config.commsRoot.replace(/\\/g, '/'))
+    .replace(/\{\{WORKSPACE_BLOCK\}\}/g, () => describeWorkspace(config, agent));
 }
 
+/** The pointer body as it stands now — everything after the marker line. */
+const CURRENT_POINTER_BODY = [
+  '## Working with other agents through the orchestrator',
+  '',
+  'Some sessions are started by a tool rather than by a person. Those messages say so',
+  'and carry a numbered ledger thread. When you see one, **read**',
+  `\`${POINTER_REL}\` in this directory before acting on it — it`,
+  'explains what to write, where, and what not to do.',
+  '',
+  'In an ordinary interactive session, that file is also where to look if you find',
+  'work belonging to another agent, a file they own that needs changing, or a question',
+  'only they can answer. You can leave them a message with the `/ledger-note` skill.',
+].join('\n');
+
 /**
- * The few lines an agent's CLAUDE.md gains. Everything else stays in the file.
+ * The pointer wording before the current one, frozen as a literal.
  *
- * v2 added the second paragraph. v1 ended with "Ignore this section entirely in an
- * ordinary interactive session", which became actively wrong once `/ledger-note`
- * existed: reaching the ledger from an interactive session is a thing this agent can
- * now do, and an instruction to ignore the pointer would stop it discovering that.
+ * One wording back, not a version history. The only question an install has to answer
+ * is "did I write this block, or has someone edited it?" — replace it in place if it
+ * is mine, leave it alone if it is not. Answering that needs the exact text of what is
+ * actually installed out there, which is the previous wording and nothing older.
+ *
+ * A literal, though, and not generated from the current body with the marker swapped.
+ * That refactor removes the duplication and shipped once: the day the wording changed,
+ * the reconstructed block became the *new* text, matched nothing on any agent's disk,
+ * and every upgrade quietly reported the operator's own CLAUDE.md as hand-edited.
+ * History cannot be derived from the present.
+ *
+ * Two consequences worth knowing. Skipping a release degrades the in-place upgrade to
+ * `--force`, so bump one at a time. And when the body above changes, this one becomes
+ * the outgoing text — replace it and extend the version list below.
  */
+const PREVIOUS_POINTER_BODY = [
+  '## Working with other agents through the orchestrator',
+  '',
+  'Some sessions are started by a tool rather than by a person. Those messages say so',
+  'and carry a numbered ledger thread. When you see one, **read**',
+  `\`${POINTER_REL}\` in this directory before acting on it — it`,
+  'explains what to write, where, and what not to do.',
+  '',
+  'In an ordinary session like this one, that file is also where to look if you find',
+  'work belonging to another agent — a file they own that needs changing, or a question',
+  'only they can answer. You can leave them a message with the `/ledger-note` skill.',
+  'Ask me first.',
+].join('\n');
+
+/**
+ * The versions carrying `PREVIOUS_POINTER_BODY` that exist on a disk somewhere.
+ *
+ * The wording did not change between v2 and v5, so the marker is all that separates
+ * them — but v2 and v3 were never installed anywhere and are not listed. Recognising
+ * a version nothing runs is not compatibility, it is decoration.
+ */
+const PREVIOUS_POINTER_VERSIONS = ['v4', 'v5'] as const;
+
+function block(version: string, body: string): string {
+  return `<!-- ${POINTER_MARKER}:${version} -->\n${body}`;
+}
+
+/** The few lines an agent's CLAUDE.md gains. Everything else stays in the file. */
 export function pointerBlock(): string {
-  return [
-    `<!-- ${POINTER_MARKER}:${PROTOCOL_VERSION} -->`,
-    '## Working with other agents through the orchestrator',
-    '',
-    'Some sessions are started by a tool rather than by a person. Those messages say so',
-    'and carry a numbered ledger thread. When you see one, **read**',
-    `\`${PROTOCOL_REL.replace(/\\/g, '/')}\` in this directory before acting on it — it`,
-    'explains what to write, where, and what not to do.',
-    '',
-    'In an ordinary session like this one, that file is also where to look if you find',
-    'work belonging to another agent — a file they own that needs changing, or a question',
-    'only they can answer. You can leave them a message with the `/ledger-note` skill.',
-    'Ask me first.',
-  ].join('\n');
+  return block(PROTOCOL_VERSION, CURRENT_POINTER_BODY);
 }
 
 /**
- * Every pointer block this application has ever written, newest first.
+ * The pointer blocks an upgrade can recognise and replace in place.
  *
- * Upgrading in place means finding the old text to replace, and the only safe way to
- * do that is to recognise it exactly. A block that has been edited by hand is left
- * alone and reported, rather than having its boundaries guessed at — CLAUDE.md is the
- * agent, and mangling it is worse than an out-of-date pointer.
+ * Recognising the old text exactly is the only safe way to replace it. A block that
+ * matches none of these has been edited, and is left alone and reported rather than
+ * having its boundaries guessed at — CLAUDE.md is the agent, and mangling it is worse
+ * than an out-of-date pointer. `--force` is the operator's opt-in for that case.
  */
-function historicPointerBlocks(): string[] {
-  const rel = PROTOCOL_REL.replace(/\\/g, '/');
-  return [
-    // v1
-    [
-      `<!-- ${POINTER_MARKER}:v1 -->`,
-      '## If a request arrives from the orchestrator',
-      '',
-      'Some sessions are started by a tool rather than by a person. Those messages say so',
-      'and carry a numbered ledger thread. When you see one, **read**',
-      `\`${rel}\` in this directory before acting on it — it`,
-      'explains what to write, where, and what not to do.',
-      '',
-      'Ignore this section entirely in an ordinary interactive session.',
-    ].join('\n'),
-    // v2 and v3 shared a pointer block; only the content file changed between them.
-    [
-      `<!-- ${POINTER_MARKER}:v2 -->`,
-      '## Working with other agents through the orchestrator',
-      '',
-      'Some sessions are started by a tool rather than by a person. Those messages say so',
-      'and carry a numbered ledger thread. When you see one, **read**',
-      `\`${rel}\` in this directory before acting on it — it`,
-      'explains what to write, where, and what not to do.',
-      '',
-      'In an ordinary session like this one, that file is also where to look if you find',
-      'work belonging to another agent — a file they own that needs changing, or a question',
-      'only they can answer. You can leave them a message with the `/ledger-note` skill.',
-      'Ask me first.',
-    ].join('\n'),
-  ];
+export function historicPointerBlocks(): string[] {
+  return PREVIOUS_POINTER_VERSIONS.map((v) => block(v, PREVIOUS_POINTER_BODY));
 }
 
 export interface ProtocolStatus {
@@ -146,6 +172,19 @@ export interface ProtocolStatus {
   pointerVersion: string | null;
   /** The pointer is present but from an older version of this application. */
   pointerStale: boolean;
+  /**
+   * The stale pointer is still verbatim as this application wrote it, so `--install`
+   * can replace it in place. False means it has been edited since and `--install` will
+   * decline — the distinction that matters, because without it a stale pointer and an
+   * unfixable one look identical and the offered fix is a silent no-op.
+   */
+  pointerUpgradable: boolean;
+  /**
+   * A pointer is present but matches neither the current text nor any version this
+   * application has written — someone has edited it. `--install` declines to touch it;
+   * `--install --force` appends a current one beside it.
+   */
+  pointerEdited: boolean;
   /** CLAUDE.md has the whole protocol pasted into it — the older arrangement. */
   legacyInline: boolean;
   claudeMdPresent: boolean;
@@ -153,10 +192,10 @@ export interface ProtocolStatus {
   ok: boolean;
 }
 
-export async function protocolStatus(agent: Agent, commsRoot: string): Promise<ProtocolStatus> {
+export async function protocolStatus(agent: Agent, config: Config): Promise<ProtocolStatus> {
   const installed = await readTextIfExists(installedPath(agent));
   const claudeMd = await readTextIfExists(path.join(agent.home, 'CLAUDE.md'));
-  const template = await renderProtocol(commsRoot);
+  const template = await renderProtocol(config, agent);
 
   const fileVersion = installed
     ? (new RegExp(`${CONTENT_MARKER}(v\\d+)`).exec(installed)?.[1] ?? null)
@@ -174,6 +213,13 @@ export async function protocolStatus(agent: Agent, commsRoot: string): Promise<P
   // in an interactive session, which is now the opposite of what is wanted.
   const fileStale = installed !== null && installed.trim() !== template.trim();
   const pointerStale = pointerPresent && pointerVersion !== PROTOCOL_VERSION;
+  // Verbatim, not merely the right version number. A block edited under a current
+  // marker is what "the version is the same, so it refuses to update" looked like from
+  // the outside: `ok` said installed, and `--install` agreed and did nothing.
+  const pointerVerbatim = claudeMd?.includes(pointerBlock()) ?? false;
+  const pointerUpgradable =
+    pointerStale && historicPointerBlocks().some((b) => (claudeMd ?? '').includes(b));
+  const pointerEdited = pointerPresent && !pointerVerbatim && !pointerUpgradable;
 
   return {
     fileInstalled: installed !== null,
@@ -182,9 +228,11 @@ export async function protocolStatus(agent: Agent, commsRoot: string): Promise<P
     pointerPresent,
     pointerVersion,
     pointerStale,
+    pointerUpgradable,
+    pointerEdited,
     legacyInline,
     claudeMdPresent: claudeMd !== null,
-    ok: installed !== null && !fileStale && pointerPresent && !pointerStale && !legacyInline,
+    ok: installed !== null && !fileStale && pointerVerbatim && !legacyInline,
   };
 }
 
@@ -194,6 +242,8 @@ export interface InstallResult {
   wrotePointer: boolean;
   removedLegacy: boolean;
   claudeMdMissing: boolean;
+  /** A current pointer was appended beside an edited one, which is still there. */
+  forced: boolean;
   notes: string[];
 }
 
@@ -202,17 +252,22 @@ export interface InstallResult {
  * at it. Idempotent: safe to re-run after pulling a new version of this repository,
  * which is the whole point of the arrangement.
  */
-export async function installProtocol(agent: Agent, commsRoot: string): Promise<InstallResult> {
+export async function installProtocol(
+  agent: Agent,
+  config: Config,
+  opts: { force?: boolean } = {}
+): Promise<InstallResult> {
   const result: InstallResult = {
     wroteFile: false,
     fileWasUpdated: false,
     wrotePointer: false,
     removedLegacy: false,
     claudeMdMissing: false,
+    forced: false,
     notes: [],
   };
 
-  const template = await renderProtocol(commsRoot);
+  const template = await renderProtocol(config, agent);
   const target = installedPath(agent);
   const existing = await readTextIfExists(target);
 
@@ -237,8 +292,8 @@ export async function installProtocol(agent: Agent, commsRoot: string): Promise<
     return result;
   }
 
-  // An up-to-date pointer: nothing to do.
-  if (claudeMd.includes(`${POINTER_MARKER}:${PROTOCOL_VERSION}`)) return result;
+  // Verbatim, not merely the right version number — see `pointerVerbatim` above.
+  if (claudeMd.includes(pointerBlock())) return result;
 
   // An older one: replace it in place if it is still exactly as written, so the
   // operator's own text around it survives and the pointer does not end up duplicated.
@@ -253,8 +308,22 @@ export async function installProtocol(agent: Agent, commsRoot: string): Promise<
         return result;
       }
     }
+    // Edited since it was written. There is no text to match, and no safe way to find
+    // where the block ends, so without --force this declines: CLAUDE.md is the agent,
+    // and mangling it is worse than an out-of-date pointer.
+    const at = claudeMd.indexOf(`<!-- ${POINTER_MARKER}`);
+    const line = claudeMd.slice(0, at < 0 ? 0 : at).split('\n').length;
+    if (!opts.force) {
+      result.notes.push(
+        `The CLAUDE.md pointer at line ${line} has been edited since it was written, so it was left alone. Re-run with --force to append a current one beside it, or replace it by hand with:\n\n${pointerBlock()}`
+      );
+      return result;
+    }
+    await writeText(claudeMdPath, claudeMd.trimEnd() + '\n\n' + pointerBlock() + '\n');
+    result.wrotePointer = true;
+    result.forced = true;
     result.notes.push(
-      `The CLAUDE.md pointer is an older version and has been edited since it was written, so it was left alone. Replace it by hand with:\n\n${pointerBlock()}`
+      `Appended a ${PROTOCOL_VERSION} pointer at the end. The edited one at line ${line} was left exactly as it is, so this agent now reads two versions of the same section — delete the old one by hand.`
     );
     return result;
   }
