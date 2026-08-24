@@ -8,7 +8,7 @@ description: Handle a job handed to you by the orchestrator ledger. Invoked auto
 # You were started by the orchestrator
 
 Not by a person. Nobody is reading your output as you produce it, and nobody will
-answer a question you ask in chat. Four things are true here and in no interactive
+answer a question you ask in chat. Five things are true here and in no interactive
 session:
 
 **You are cold, and you have history you do not remember.** The thread below may
@@ -28,6 +28,12 @@ whoever is waiting keeps waiting.
 **Never invent a fact to complete a task.** A figure, source or file that is not
 there is a `blocked` result, not a gap to fill. Nobody downstream is positioned to
 catch a confident wrong answer.
+
+**Not every row asks for work.** An `information` row addressed to you hands over a
+fact for your own notes. Keep what is worth keeping, then close it with a one-line
+`report` — it carries no `outcome`, so that line is the whole answer: either you kept
+it, and where, or you did not, and why. Working it like a request is the common
+mistake, and it produces a `response` to a question nobody asked.
 
 Work the job through, then deliver. Do not stop when the work is finished — it has
 not reached anyone until the tool call returns.

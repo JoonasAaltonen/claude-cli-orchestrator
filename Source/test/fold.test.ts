@@ -464,6 +464,78 @@ test('fan-out: once every branch is in, the coordinator is invoked once to compi
   );
 });
 
+/**
+ * One request, several recipients — the form ledger row 0018 used in practice, and
+ * the one the protocol was ambiguous about until v6 was corrected.
+ *
+ * The question this pins: does the row release on the *first* reply, or on the last?
+ * If the first, the requester is handed the thread with replies still in flight and
+ * the fan-out mechanism is broken for this shape, so it has to be the last — the same
+ * answer as the one-message-per-agent form, which is what makes the two equivalent.
+ */
+const MULTI_RECIPIENT = rows(
+  '0001 ; 2026-08-22T09:00:00Z ; operator ; coordinator ; request ;  ;  ;  ; messages\\0001-a.md ; Position on the pricing change',
+  '0002 ; 2026-08-22T09:05:00Z ; coordinator ; researcher+writer+archivist ; request ; 0001 ;  ;  ; messages\\0002-b.md ; Your read on the pricing change'
+);
+
+test('one request to several agents is outstanding on every one of them', () => {
+  const f = fold(MULTI_RECIPIENT, SETTINGS);
+  for (const who of ['researcher', 'writer', 'archivist']) {
+    assert.deepEqual(awaiting(f, who).map((o) => o.row.id), ['0002'], `${who} must be invoked`);
+  }
+  assert.deepEqual(awaiting(f, 'coordinator'), [], 'blocked by the request it wrote');
+});
+
+/** The same request with two of the three recipients answered. */
+const TWO_ANSWERED = MULTI_RECIPIENT.concat(
+  rows(
+    '0003 ; 2026-08-22T09:20:00Z ; researcher ; coordinator ; response ; 0002 ;  ; done ; messages\\0003-c.md ; Mine',
+    '0004 ; 2026-08-22T09:25:00Z ; writer ; coordinator ; response ; 0002 ;  ; done ; messages\\0004-d.md ; Mine too'
+  )
+);
+
+test('one request to several agents is released by the last reply, not the first', () => {
+  const partial = fold(TWO_ANSWERED, SETTINGS);
+  assert.deepEqual(
+    awaiting(partial, 'coordinator'),
+    [],
+    'two of three answered is not enough — the row is still open on the archivist'
+  );
+  assert.deepEqual(awaiting(partial, 'archivist').map((o) => o.row.id), ['0002']);
+  assert.deepEqual(awaiting(partial, 'researcher'), [], 'an agent that answered is not asked twice');
+
+  const done = fold(
+    TWO_ANSWERED.concat(
+      rows(
+        '0005 ; 2026-08-22T09:30:00Z ; archivist ; coordinator ; response ; 0002 ;  ; done ; messages\\0005-e.md ; And mine'
+      )
+    ),
+    SETTINGS
+  );
+  const forCoordinator = awaiting(done, 'coordinator');
+  assert.deepEqual(
+    forCoordinator.map((o) => o.row.id),
+    ['0001'],
+    'the last reply hands the coordinator its own row back, once'
+  );
+  assert.deepEqual(forCoordinator[0]!.blockedBy, []);
+});
+
+test('a report from one recipient does not discharge that recipient', () => {
+  // M9 — reports are for the operator, not answers. The distinction matters most on
+  // this shape: a report that closed a recipient's share would release the whole row
+  // early for everyone still working.
+  const f = fold(
+    MULTI_RECIPIENT.concat(
+      rows(
+        '0003 ; 2026-08-22T09:20:00Z ; researcher ; coordinator ; report ; 0002 ;  ;  ; messages\\0003-c.md ; Started on it'
+      )
+    ),
+    SETTINGS
+  );
+  assert.deepEqual(awaiting(f, 'researcher').map((o) => o.row.id), ['0002'], 'still owed');
+});
+
 test('an agent-started chain closes without anyone reporting to the operator', () => {
   // Not a defect in the fold: a response closes a request and owes nothing further.
   // It is a property of the shape, and it matters because the human who set this off

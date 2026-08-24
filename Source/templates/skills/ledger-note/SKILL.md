@@ -11,9 +11,11 @@ Use this when, in the course of doing something else, you have found work that i
 yours: a file another agent owns needs updating, a question needs someone else's
 knowledge, or something has been settled that other agents should not re-litigate.
 
-The message goes into the ledger and the addressee is invoked to deal with it the next
-time the orchestrator runs. You do not wait for a reply and you do not get one in this
-session — you are dropping something into a queue and carrying on.
+The message goes into the ledger. If it is a `request` or an `information` message the
+addressee is invoked to deal with it the next time the orchestrator runs; a `report` or
+a `decision` is recorded and read in place, and invokes nobody. Either way you do not
+wait for a reply and you do not get one in this session — you are dropping something
+into a queue and carrying on.
 
 **Nobody will report back.** When the addressee answers, the chain is finished and
 nothing is addressed to the person you are talking to — they will not be told, in this
@@ -65,13 +67,43 @@ directly, so the two need to agree.
 | Field | Required | What goes in it |
 |---|---|---|
 | `to` | yes | Who should act on this. One agent name, or several separated by `+`. Use `operator` for the human. |
-| `type` | yes | `request` if you are asking for work · `report` if you are only telling them · `decision` if something is settled and future work should not re-open it · `information` if it is a fact worth keeping in their own notes for later |
+| `type` | yes | `request` · `report` · `decision` · `information` — see *Which type* below. |
 | `summary` | yes | One line. Any punctuation is fine — it is stored as data, not parsed. |
 | `replyTo` | no | Leave it out. You are starting something, not answering it. |
 | `outcome` | no | Leave it out. It belongs only on a `response` or `signoff`. |
 
 Do not set `writer` — the orchestrator takes it from which outbox the file was found
 in, so it is already you and cannot be anything else.
+
+## Which type
+
+Two of these cost another agent a full invocation and two do not. That is the
+distinction to get right, because it is the one the person you are talking to is paying
+for.
+
+**`request`** — you are asking for work. It is delivered, it stays open until the
+addressee answers it, and it is the only type that produces work.
+
+**`information`** — you are handing over a fact worth keeping: a path that moved, a
+figure that was superseded, something settled elsewhere that changes an assumption they
+hold. It is delivered exactly as a request is, **costs an invocation of theirs**, and
+stays on them until they acknowledge it. No work is being asked, so what comes back is
+a one-line `report`. It carries no `outcome` — there is no work to describe — so that
+line is the whole answer, and it says one of two things: they kept it, and where, or
+they did not, and why ("we already hold this, from the source", "this contradicts what
+we hold"). Send one only when the fact is worth an invocation and would otherwise be
+lost. It is not a newsletter.
+
+**`report`** — you are telling them what happened, and nothing more. It is recorded in
+the thread and **invokes nobody**, so it is read only by someone who is already there.
+
+**`decision`** — something is settled and future work must not re-open it. It invokes
+nobody either, but unlike a report it is collected into the digest shown to every agent
+at the top of every invocation. Use it when the answer would otherwise be re-litigated.
+
+Unsure between `information` and `report`? Ask whether anyone needs to *keep* this. If
+they do, `information` — and accept that it costs an invocation. If it is only news,
+`report`.
 
 ## Write it for someone who was not here
 

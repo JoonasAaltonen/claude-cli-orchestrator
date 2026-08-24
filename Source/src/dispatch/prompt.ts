@@ -226,9 +226,16 @@ function buildPendingBlock(config: Config, agent: Agent, pending: Outstanding[])
               + ' so you cannot file this yourself. If it is worth keeping, say so in your'
               + ' acknowledgement and quote the part that matters, so the operator can place it.'
       );
+      // A report carries no outcome (M1), so the acknowledgement line is the whole of
+      // the answer — and "I already hold this" is as useful to the sender as "kept it",
+      // which is why both shapes are named. Without that, a fact the recipient declines
+      // to keep is closed by a line that does not say so, and the sender learns nothing.
       lines.push(
-        `- Then acknowledge it: one \`report\` with \`replyTo: ${r.id}\`, saying in a line whether`
-          + ' you recorded it and where. That is what closes it; until then it comes back to you.'
+        `- Then acknowledge it: one \`report\` with \`replyTo: ${r.id}\`. It carries no`
+          + ' `outcome`, so that one line is your whole answer, and it says one of two things:'
+          + ' you kept it, and where — or you did not, and why, because "we already hold this"'
+          + ' and "this contradicts what we hold" are worth very different follow-ups from'
+          + ' whoever sent it. That is what closes it; until then it comes back to you.'
       );
     } else {
       lines.push(`- Answer it with \`replyTo: ${r.id}\``);

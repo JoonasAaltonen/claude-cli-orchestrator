@@ -51,10 +51,14 @@ reads it next may be as cold as you were.
 - `outcome` is required on `response` and `signoff`, and must not appear on anything else.
 - `replyTo` is required whenever you are answering something.
 - An `information` message is delivered to whoever it is addressed to and stays open
-  until they reply. If one arrives for you, no work is being asked: put what is worth
-  keeping wherever your notes live — see *What you are permitted here* — and close it
-  with a one-line `report`. If you have nowhere to write it, quote the fact in the
-  report, so it is at least in the thread rather than lost.
+  until they reply. If one arrives for you, no work is being asked: decide whether the
+  fact is worth keeping, then close it with a one-line `report`. A report carries no
+  `outcome`, so that line is the whole of your answer, and it says one of two things —
+  **kept it**, and where you put it, or **not kept**, and why. "We already hold this"
+  and "this contradicts what we hold" are worth very different follow-ups from the
+  sender, so say which. If it is worth keeping but you have nowhere to write it — see
+  *What you are permitted here* — quote the fact in the report, so it is at least in
+  the thread rather than lost.
 - Leave `needs` out entirely unless the work is outward-facing, makes a checkable
   claim of fact, or crosses a publication boundary. Every name in it costs another
   agent a full invocation.
@@ -68,13 +72,24 @@ them, and cannot.
 
 ### When the work needs someone else
 
-Write **one request per agent you are asking**, each with `replyTo` set to the row you
-were given — not a new thread. Then **leave that row unanswered**.
+**Ask each agent once.** Set `replyTo` to the row you were given — not a new thread —
+then **leave that row unanswered**.
 
-That is what keeps the work yours. The orchestrator sees your requests hanging below
-the row, so it will not invoke you again while they are outstanding, and when the last
-one is answered it hands you the whole thread — your instructions, your requests and
-every reply — so you can write the answer that closes it.
+One message may name several recipients (`to: marketing+pr`) when the ask is genuinely
+the same for each. It stays outstanding until every one of them has answered, exactly
+as separate messages would, so either form works and the choice is yours. What you must
+not do is send the same agent two messages about one thing: that is two invocations of
+them for one question, and their two replies have no single place to land.
+
+Leaving the row unanswered is what keeps the work yours. The orchestrator sees your
+requests hanging below the row, so it will not invoke you again while they are
+outstanding, and when the last one is answered it hands you the whole thread — your
+instructions, your requests and every reply — so you can write the answer that closes
+it.
+
+A recipient discharges your request by answering it with a `response` carrying an
+outcome — or a `signoff`, where you asked for one. Their `report` does not: the row
+still waits on them.
 
 Answering the row now is what breaks this. Any `response` closes it, including
 `outcome: deferred`, and the replies you asked for then arrive with nobody left to
