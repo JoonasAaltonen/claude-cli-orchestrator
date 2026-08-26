@@ -31,7 +31,7 @@ import { appRoot } from '../config/load.js';
 import { readText, readTextIfExists, writeText } from '../util/fsx.js';
 import { SKILLS, installedSkillPath } from '../contract/names.js';
 
-export const SKILL_VERSION = 'v1';
+export const SKILL_VERSION = 'v2';
 
 /** Marks a skill file as this application's, and carries its version. */
 const SKILL_MARKER = 'orchestrator-skill:';

@@ -23,7 +23,16 @@
 import path from 'node:path';
 import YAML from 'yaml';
 import { z } from 'zod';
-import { MESSAGE_TYPES, OUTCOMES, OUTCOME_TYPES, NAME_PATTERN, normaliseSummary } from './row.js';
+import {
+  MESSAGE_TYPES,
+  OUTCOMES,
+  OUTCOME_TYPES,
+  OUTCOME_INFO,
+  BODY_REQUIRED_OUTCOMES,
+  NAME_PATTERN,
+  answeringTypeList,
+  normaliseSummary,
+} from './row.js';
 import type { MessageType, Outcome } from './row.js';
 import { readText } from '../util/fsx.js';
 
@@ -156,7 +165,7 @@ export function parseMessageText(text: string, sourceFile: string): ParsedMessag
     errors.push(`outcome: required on a "${f.type}" message. One of: ${OUTCOMES.join(', ')}`);
   }
   if (f.outcome && f.type && !OUTCOME_TYPES.has(f.type)) {
-    errors.push(`outcome: only response and signoff messages carry an outcome, not "${f.type}"`);
+    errors.push(`outcome: only ${answeringTypeList()} messages carry an outcome, not "${f.type}"`);
   }
 
   if (!f.to.length) {
@@ -180,10 +189,28 @@ export function parseMessageText(text: string, sourceFile: string): ParsedMessag
     );
   }
 
-  // M4 — a rejection is invalid unless it states what would make it pass.
-  if (f.outcome === 'rejected' && body.length < 40) {
+  // M4 generalised — an outcome that reports work not done is invalid unless the body
+  // says why. The original rule was for `rejected` alone, and its reasoning ("a bare
+  // rejection costs a full invocation and returns the same problem") is not specific
+  // to refusal: an unexplained `blocked` or `partial` leaves the agent that asked with
+  // no move except to ask again, which is the same wasted invocation.
+  if (f.outcome && BODY_REQUIRED_OUTCOMES.has(f.outcome) && body.length < 40) {
+    const info = OUTCOME_INFO[f.outcome as Outcome];
     errors.push(
-      'outcome "rejected" requires a body stating the specific change that would make it pass (M4). A bare rejection costs a full invocation and returns the same problem.'
+      `outcome "${f.outcome}" requires a body (M4). ${info.what} Without that, whoever asked can`
+        + ' only ask again, which costs a full invocation and returns the same problem.'
+    );
+  }
+
+  // A deliverable claims something was produced, so it has to say where. The rule is
+  // presence, not shape: T6 puts anything an agent must format correctly in the
+  // expensive column, and demanding a labelled field here would bounce messages over
+  // punctuation. The protocol asks for the path; this only refuses an empty claim.
+  if (f.type === 'deliverable' && body.length < 40) {
+    errors.push(
+      'a "deliverable" message must say in the body where the artefact is — the path, or the'
+        + ' thing itself if it is short enough to carry. A deliverable nobody can open is a'
+        + ' response; send it as one.'
     );
   }
 

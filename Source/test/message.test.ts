@@ -191,3 +191,67 @@ test('a rendered file round-trips through the parser unchanged', () => {
   assert.equal(reparsed.ok, true, reparsed.errors.join('; '));
   assert.deepEqual(reparsed.draft, draft);
 });
+
+test('M4 generalised: an outcome that reports work not done must say why', () => {
+  // The original rule covered `rejected` alone, and its reasoning is not specific to
+  // refusal: an unexplained `blocked` or `partial` leaves whoever asked with no move
+  // except to ask again, which is the same wasted invocation M4 exists to prevent.
+  for (const outcome of ['partial', 'blocked', 'deferred'] as const) {
+    const bare = parseMessageText(
+      msg(`to: c\ntype: response\nreplyTo: 0001\noutcome: ${outcome}\nsummary: Could not finish`, 'Nope.'),
+      FILE
+    );
+    assert.equal(bare.ok, false, `${outcome} with a bare body should be refused`);
+    assert.ok(bare.errors.join(' ').includes('M4'));
+  }
+
+  const explained = parseMessageText(
+    msg(
+      'to: c\ntype: response\nreplyTo: 0001\noutcome: partial\nsummary: Twelve of fifteen',
+      'Twelve sites surveyed. Three were unreachable — two 404, one redirected and I ran out of budget.'
+    ),
+    FILE
+  );
+  assert.equal(explained.ok, true, explained.errors.join('; '));
+  assert.equal(explained.draft?.outcome, 'partial');
+});
+
+test('a done outcome needs no justification — only work not done does', () => {
+  const p = parseMessageText(
+    msg('to: c\ntype: response\nreplyTo: 0001\noutcome: done\nsummary: Filed it', 'Done.'),
+    FILE
+  );
+  assert.equal(p.ok, true, p.errors.join('; '));
+});
+
+test('a deliverable carries an outcome and must say where the artefact is', () => {
+  const empty = parseMessageText(
+    msg('to: c\ntype: deliverable\nreplyTo: 0001\noutcome: done\nsummary: Survey done', 'Done.'),
+    FILE
+  );
+  assert.equal(empty.ok, false, 'a deliverable nobody can open is not a deliverable');
+
+  const located = parseMessageText(
+    msg(
+      'to: c\ntype: deliverable\nreplyTo: 0001\noutcome: done\nsummary: Survey of twelve sites',
+      'Written to C:\\Shared\\Documents\\survey.md — twelve companies, eight countries, no UK.'
+    ),
+    FILE
+  );
+  assert.equal(located.ok, true, located.errors.join('; '));
+  assert.equal(located.draft?.type, 'deliverable');
+  // T5 — a single-quoted or plain YAML scalar passes backslashes through, and the body
+  // is not YAML at all, so a Windows path survives the round trip unaltered.
+  assert.ok(located.draft?.body.includes('C:\\Shared\\Documents\\survey.md'));
+});
+
+test('the outcome error names every legal value, including new ones', () => {
+  // A cold agent gets one shot at reading a bounce, so the message lists the full set
+  // rather than only saying the value was wrong.
+  const p = parseMessageText(
+    msg('to: c\ntype: response\nreplyTo: 0001\noutcome: mostly\nsummary: Nearly there', 'Body.'),
+    FILE
+  );
+  assert.equal(p.ok, false);
+  assert.ok(p.errors.join(' ').includes('partial'), 'the new outcome must appear in the bounce');
+});

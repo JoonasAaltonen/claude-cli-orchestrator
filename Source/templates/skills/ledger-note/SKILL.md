@@ -3,7 +3,7 @@ name: ledger-note
 description: Leave a message in the orchestrator ledger for another agent — a request, a heads-up, or a decision worth recording. Use from an ordinary session when work belongs to someone else, or when a file another agent owns needs to change.
 ---
 
-<!-- orchestrator-skill:v1 — installed by `orchestrator agents skills`. Local edits are overwritten on update. -->
+<!-- orchestrator-skill:v2 — installed by `orchestrator agent skills --install`, or from the dashboard. Local edits are overwritten on update. -->
 
 # Leave a message in the ledger
 
@@ -70,7 +70,7 @@ directly, so the two need to agree.
 | `type` | yes | `request` · `report` · `decision` · `information` — see *Which type* below. |
 | `summary` | yes | One line. Any punctuation is fine — it is stored as data, not parsed. |
 | `replyTo` | no | Leave it out. You are starting something, not answering it. |
-| `outcome` | no | Leave it out. It belongs only on a `response` or `signoff`. |
+| `outcome` | no | Leave it out. It belongs only on a message that answers one — a `response`, a `deliverable` or a `signoff`. |
 
 Do not set `writer` — the orchestrator takes it from which outbox the file was found
 in, so it is already you and cannot be anything else.
@@ -104,6 +104,10 @@ at the top of every invocation. Use it when the answer would otherwise be re-lit
 Unsure between `information` and `report`? Ask whether anyone needs to *keep* this. If
 they do, `information` — and accept that it costs an invocation. If it is only news,
 `report`.
+
+The ledger has other types — `response`, `deliverable`, `signoff` — and none of them
+belongs here. Each answers a row that already exists, and what you are doing from this
+session is starting something.
 
 ## Write it for someone who was not here
 

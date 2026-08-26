@@ -36,10 +36,14 @@ test('an open thread names who can move and who is merely blocked', () => {
 });
 
 test('a finished chain that never addressed the operator is called out', () => {
+  // Row 3 is what finishes it. Without it the thread is still open — the coordinator
+  // asked for this and has not yet been told it arrived — so the interesting case is
+  // the one where the requester *has* picked the answer up and still told nobody.
   const text = renderStatusFile(
     rows(
       '0001 ; 2026-08-22T09:00:00Z ; coordinator ; worker ; request ;  ;  ;  ; m\\a.md ; Please do the thing',
-      '0002 ; 2026-08-22T09:20:00Z ; worker ; coordinator ; response ; 0001 ;  ; done ; m\\b.md ; Done, file is at X'
+      '0002 ; 2026-08-22T09:20:00Z ; worker ; coordinator ; response ; 0001 ;  ; done ; m\\b.md ; Done, file is at X',
+      '0003 ; 2026-08-22T09:30:00Z ; coordinator ; worker ; report ; 0001 ;  ;  ; m\\c.md ; Noted, filed it'
     ),
     OPTS
   );

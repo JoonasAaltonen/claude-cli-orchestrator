@@ -27,7 +27,7 @@ import {
   addRosterAgent,
   clearKillSwitch,
   dispatchAgent,
-  installContractFor,
+  installContract,
   removeRosterAgent,
   setKillSwitch,
   updateRosterAgent,
@@ -471,8 +471,16 @@ async function handlePost(
         sendJson(res, 200, { removed: removed.name, home: removed.home });
         return;
       }
+      // One agent, or every agent — `agent protocol --install` and `agent skills
+      // --install`, with `--all` and `--force` behind the same endpoint.
+      //
+      // Idle for the same reason a roster edit is, and it is not a formality here:
+      // `ledger-invocation` is injected into the prompt at dispatch, so replacing it
+      // between two invocations of one run would hand the second half of a chain
+      // different delivery instructions from the first, with nothing saying so.
       case '/api/agents/install': {
-        const installed = await installContractFor(config, body);
+        requireIdle('reinstall the protocol and skills');
+        const installed = await installContract(config, body);
         sendJson(res, 200, installed);
         return;
       }

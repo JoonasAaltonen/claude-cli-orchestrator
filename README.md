@@ -9,8 +9,10 @@ to continue a chain of work a human started.
 ## What it is, and is not
 
 One machine, one operator, a handful of agents. Local storage. Nothing is hosted and
-**nothing binds a port** — the operator interface is this CLI. There is an MCP server,
-but it speaks over stdio to a process the CLI spawns; no socket is involved.
+nothing is reachable from the network. There are two operator interfaces — this CLI,
+and a dashboard that binds **loopback only**, behind a token, and only for as long as
+you leave `orchestrator ui` running. There is an MCP server, but it speaks over stdio
+to a process the CLI spawns; no socket is involved.
 
 **It ships no agents.** You point it at directories that already exist and belong to
 you, and it becomes a channel between them. Registering an agent writes a handful of
@@ -89,6 +91,9 @@ npm run orchestrator -- run --dry-run
 
 # 7. Run it.
 npm run orchestrator -- run
+
+# 8. Or do all of it from the dashboard, which is the same functions behind a page.
+npm run orchestrator -- ui --open
 ```
 
 To get `orchestrator <command>` on your PATH instead of typing
@@ -158,28 +163,123 @@ this code.
 
 ## Commands
 
+`orchestrator <command> --help` is the authoritative list of flags; this is the map.
+Every command takes `-c, --config <file>` — otherwise `orchestrator.config.json` in the
+working directory, or `$ORCHESTRATOR_CONFIG`.
+
+### Setting up
+
 | Command | What it does |
 |---|---|
-| `init` | Create a comms root, scaffold agent directories, write a config |
-| `doctor` | Check paths, roster, prompt template, guards, and verify every flag against the installed CLI |
-| `probe [agent]` | One live invocation that proves cwd, outbox writes, and the shell denial |
-| `probe-contract [agent]` | One live invocation proving the skill resolves and the MCP tool is reachable. Nothing reaches the ledger |
-| `probe-slash [agent]` | Whether a slash command resolves in `--print` at all. Only needed if `probe-contract` fails |
-| `agent skills [name] --install --all` | Install or update the ledger skills in agent directories |
-| — | Optional skills ship in [`Source/templates/optional-skills/`](Source/templates/optional-skills/) and are installed by hand, not by any command |
+| `init [--comms-root <dir>] [--force]` | Create a comms root and a config with an **empty** roster. `--force` overwrites an existing config |
+| `agent add <name> --home <dir>` | Register a directory that already exists. It refuses one that does not |
+| `agent list` | The roster, with whatever each agent's grants come to and whether it knows the protocol |
+| `agent remove <name>` | Drop it from the roster. Its directory is not touched, and its rows stay in the ledger |
+| `agent protocol [name] [--install] [--all] [--force]` | Print the protocol, show where an agent stands, or install it. `--all` is the update path after pulling a new version; `--force` appends a current pointer beside one that has been edited by hand |
+| `agent skills [name] [--install] [--all]` | Show or install the two ledger skills. Agents' own skills are never touched |
+| `doctor [--fix-hooks-audit]` | Check paths, roster, prompt template, guards, and verify every flag against the installed CLI. `--fix-hooks-audit` records the permission-hook audit for each agent directory |
 | `migrate-index` | Convert a pre-NDJSON `index.txt`. The old file is left untouched |
-| `write` | Write a row as the operator — including `decision` rows |
+
+`agent add` takes the same grants the dashboard shows as checkboxes —
+`--no-home-writable`, `--shell-allowed`, `--allow-subagents`, `--allow-mcp`,
+`--dispatch-excluded` — plus `--description`, `--model`, `--read-path`, `--write-path`,
+`--tool`, `--web`, and `--write-protocol` to install the agent-side contract at
+registration.
+
+Optional skills ship in [`Source/templates/optional-skills/`](Source/templates/optional-skills/)
+and are installed by hand, not by any command.
+
+### Proving it works before spending anything
+
+| Command | What it does |
+|---|---|
+| `probe [agent] [-y]` | One live invocation that proves cwd, outbox writes, and the shell denial |
+| `probe-contract [agent] [-y]` | One live invocation proving the skill resolves and the MCP tool is reachable. Nothing reaches the ledger |
+| `probe-slash [agent] [-y]` | Whether a slash command resolves in `--print` at all. Only needed if `probe-contract` fails |
+
+### Working the ledger
+
+| Command | What it does |
+|---|---|
+| `write` | Write a row as the operator — including `decision` rows. `--to`, `--type`, `--summary`, `--body`/`--body-file`, `--reply-to`, `--needs`, `--outcome`, `--hop-budget`, `--invocation-ceiling` |
 | `inbox [--for who]` | What is waiting on you |
-| `status` | Open threads, stale threads, halted threads, recent decisions |
-| `ledger [--thread ID]` | The index, or one thread root-first |
+| `status` | Open threads, stale threads, halted threads, recent decisions. Also rewrites `status.md`, the copy agents read |
+| `ledger [--thread ID] [--raw]` | The index, or one thread root-first |
 | `relay` | Rows queued for manual relay to a dispatch-excluded agent |
+
+### Running agents
+
+| Command | What it does |
+|---|---|
 | `sweep [agent]` | Sweep outboxes, validate, append valid rows, bounce invalid ones |
-| `dispatch <agent>` | Manual dispatch. `--dry-run` prints the prompt and spends nothing |
-| `run [--sweep]` | Drive the chain serially until nothing is outstanding. `--sweep` adopts notes agents left in their outboxes first |
-| `watch [--outboxes]` | React to new work. `--outboxes` also watches agent outboxes, not just the index |
-| `log` | The invocation log — verdict, cost, wall time, denials, prompt path |
+| `dispatch <agent> [-n]` | Manual dispatch. `--dry-run` prints the prompt and spends nothing |
+| `run [--sweep] [-n] [--max-iterations n]` | Drive the chain serially until nothing is outstanding. `--sweep` adopts notes agents left in their outboxes first |
+| `watch [--outboxes] [-n]` | React to new work. `--outboxes` also watches agent outboxes, not just the index |
+
+### Seeing what happened, and stopping it
+
+| Command | What it does |
+|---|---|
+| `log [--last n] [--json]` | The invocation log — verdict, cost, wall time, denials, prompt path |
 | `budget` | What each chain has left, and the global caps |
 | `stop [reason]` / `resume` | Set and clear the kill switch |
+| `problems [-n limit] [--browser] [--server] [--file <path>]` | Failures recorded by the dashboard and its server, newest last |
+
+### The dashboard
+
+| Command | What it does |
+|---|---|
+| `ui [--port n] [--open] [--new-token] [--log-file <file>]` | Serve the operator dashboard on loopback until Ctrl+C |
+
+---
+
+## The dashboard
+
+```bash
+npm run orchestrator -- ui --open
+```
+
+It binds `ports.bindAddress:ports.operatorView` — `127.0.0.1:43818` unless you change
+it — and prints a URL carrying a token. **The URL is stable across restarts**, because
+the token is stored beside your config rather than minted per launch: bookmark it, or
+make a shortcut for `orchestrator ui --open` and never see the URL at all. Rotate with
+`--new-token`, which invalidates every existing bookmark, and that is the point of it.
+
+A loopback bind authenticates nobody — any process on this machine can reach
+127.0.0.1, and this server can spend your quota — so the token is not decoration. It
+lives beside `orchestrator.config.json` and deliberately **not** in the comms root,
+which every dispatched agent can read.
+
+Five tabs, and each is a view of the same functions the CLI calls rather than a second
+implementation:
+
+- **Now** — open threads, and the two ways a run starts. *Start with instructions*
+  writes your request to the ledger and then runs it; *Pick up pending work* sweeps
+  every outbox first and runs whatever is outstanding, with no message from you. The
+  invocation streams into the console as it goes, and *Stop everything* is the kill
+  switch.
+- **Ledger** — the index, and any thread opened root-first with the message bodies,
+  not just the rows.
+- **Agents** — where each agent stands on the protocol file, the CLAUDE.md pointer and
+  the two ledger skills, and the button that installs them into **every** registered
+  directory at once. That is `agent protocol --all --install` and `agent skills --all
+  --install` in one press, and it is what to do after pulling a new version of this
+  repository — a stale `ledger-invocation` skill is injected into every prompt and
+  quietly changes how each agent is handed its job. A CLAUDE.md pointer you have
+  edited by hand is reported and left alone unless you tick the box that appends a
+  current one beside it.
+- **Runs** — the invocation log: verdict, cost, wall time, denials.
+- **Config** — the roster. The same grants, paths and per-agent limits `agent add`
+  takes, with a directory picker, and each agent's install button beside its entry.
+
+Roster edits and contract installs are refused while a run is in progress: an agent's
+boundaries and its delivery instructions are read per dispatch, and changing either
+between two invocations of one chain would give the second half different rules from
+the first with nothing in the ledger saying so.
+
+Failures on both sides — the page's own exceptions and the server's — are printed to
+the terminal and appended to `state/problems.jsonl`, readable later with
+`orchestrator problems`.
 
 ---
 
@@ -268,7 +368,8 @@ The prompt itself is delivered through a skill (`/ledger-invocation`) installed 
 agent's directory. Measured: the slash command and `$ARGUMENTS` are both expanded
 client-side, before the model sees anything — so the delivery instructions are injected
 rather than being something the model reads on its way past. Install with
-`orchestrator agent skills --all --install`; your agents' own skills are never touched.
+`orchestrator agent skills --all --install`, or from the Agents tab of the dashboard;
+your agents' own skills are never touched.
 
 ### Messages that start in an ordinary session
 
@@ -370,7 +471,7 @@ and a different instruction file.
 
 ```bash
 cd Source
-npm test           # 128 tests, no network, no invocations
+npm test           # 266 tests, no network, no invocations
 npm run typecheck
 ```
 

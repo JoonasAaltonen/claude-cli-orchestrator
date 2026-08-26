@@ -30,7 +30,7 @@ import { readText, readTextIfExists, writeText } from '../util/fsx.js';
  * a mismatch cannot hide: the template's marker and this constant are asserted equal
  * in the tests, which is how a content bump that forgot the pointer was caught.
  */
-export const PROTOCOL_VERSION = 'v6';
+export const PROTOCOL_VERSION = 'v7';
 
 /** Marks the pointer line inside an agent's CLAUDE.md. */
 const POINTER_MARKER = 'orchestrator-protocol-ref';
@@ -140,6 +140,34 @@ const PREVIOUS_POINTER_BODY = [
  */
 const PREVIOUS_POINTER_VERSIONS = ['v4', 'v5'] as const;
 
+/**
+ * The v6 pointer, frozen as its own literal.
+ *
+ * The version is bumped whenever *either* half changes, and the content file changes
+ * far more often than the pointer does. v7 changed the protocol document alone, so an
+ * agent sitting on v6 has a block on disk that reads identically to the current one —
+ * and it still needs its own frozen copy rather than `block('v6', CURRENT_POINTER_BODY)`.
+ *
+ * The duplication below is the point, and it is the same lesson as `PREVIOUS_POINTER_BODY`
+ * one version further on: a historic block reconstructed from the live body follows the
+ * live body. Write it that way and the next wording change silently turns every v6 block
+ * into v8 text, matches nothing on disk, and reports each operator's CLAUDE.md as
+ * hand-edited — which is precisely the failure that made the previous body a literal.
+ * History cannot be derived from the present, however identical it looks today.
+ */
+const V6_POINTER_BODY = [
+  '## Working with other agents through the orchestrator',
+  '',
+  'Some sessions are started by a tool rather than by a person. Those messages say so',
+  'and carry a numbered ledger thread. When you see one, **read**',
+  '`.claude/orchestrator-protocol.md` in this directory before acting on it — it',
+  'explains what to write, where, and what not to do.',
+  '',
+  'In an ordinary interactive session, that file is also where to look if you find',
+  'work belonging to another agent, a file they own that needs changing, or a question',
+  'only they can answer. You can leave them a message with the `/ledger-note` skill.',
+].join('\n');
+
 function block(version: string, body: string): string {
   return `<!-- ${POINTER_MARKER}:${version} -->\n${body}`;
 }
@@ -158,7 +186,10 @@ export function pointerBlock(): string {
  * than an out-of-date pointer. `--force` is the operator's opt-in for that case.
  */
 export function historicPointerBlocks(): string[] {
-  return PREVIOUS_POINTER_VERSIONS.map((v) => block(v, PREVIOUS_POINTER_BODY));
+  return [
+    ...PREVIOUS_POINTER_VERSIONS.map((v) => block(v, PREVIOUS_POINTER_BODY)),
+    block('v6', V6_POINTER_BODY),
+  ];
 }
 
 export interface ProtocolStatus {

@@ -26,6 +26,7 @@ import type { Row } from './row.js';
 import { OPERATOR } from './row.js';
 import { fold } from './fold.js';
 import type { Fold, Thread } from './fold.js';
+import { REASON_INFO } from './fold.js';
 import { writeText } from '../util/fsx.js';
 
 /** Marks the file as generated, and carries the version of this renderer. */
@@ -185,12 +186,7 @@ function renderThread(t: Thread, now: Date, staleDays: number): string[] {
   out.push('| Row | From | Waiting on | Why | Blocked by |');
   out.push('|---|---|---|---|---|');
   for (const o of t.outstanding) {
-    const why =
-      o.reason === 'awaiting-signoff'
-        ? 'sign-off required'
-        : o.reason === 'unread-information'
-          ? 'information unacknowledged'
-          : 'unanswered request';
+    const why = REASON_INFO[o.reason].short;
     out.push(
       `| ${o.row.id} | ${o.row.writer} | ${o.awaiting.join(', ')} | ${why} | ${o.blockedBy.join(', ') || '—'} |`
     );

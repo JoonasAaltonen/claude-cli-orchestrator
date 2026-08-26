@@ -16,8 +16,8 @@ import { addAgent, removeAgent, updateAgent, RosterError } from '../roster/edit.
 import type { AgentPatch, AgentPathInput } from '../roster/edit.js';
 import { GRANT_FIELDS } from '../roster/edit.js';
 import { writeAgentSettings } from '../dispatch/invoke.js';
-import { installProtocol } from '../cli/protocol.js';
-import { installSkills } from '../cli/skills.js';
+import { installProtocol, protocolStatus } from '../cli/protocol.js';
+import { installSkills, skillStatus } from '../cli/skills.js';
 import { ensureDir } from '../util/fsx.js';
 import { appendRow, initCommsRoot, layout } from '../ledger/store.js';
 import { MESSAGE_TYPES, OPERATOR, OUTCOMES } from '../ledger/row.js';
@@ -291,7 +291,7 @@ export async function addRosterAgent(config: Config, body: Record<string, unknow
   await writeAgentSettings(change.config, change.agent);
 
   const installed = bool(body.installProtocol)
-    ? await installAgentContract(change.config, change.agent)
+    ? await installContractInto(change.config, change.agent)
     : null;
 
   return { ...change, installed };
@@ -327,29 +327,90 @@ export async function removeRosterAgent(config: Config, body: Record<string, unk
 
 /**
  * The agent-side half of the contract: the protocol file, the CLAUDE.md pointer and
- * the ledger skills.
+ * the ledger skills, installed into one agent.
  *
  * One action rather than three, for the reason `agent add --write-protocol` gives:
  * they are installed together or one of them ends up not installed at all.
+ *
+ * What comes back is what changed, in the same words `orchestrator agent protocol
+ * --install` prints, plus the status read back off disk afterwards — because the
+ * question an operator has after pressing the button is whether it is installed now,
+ * and an install that declined to touch an edited pointer answers that with "no".
  */
-export async function installAgentContract(config: Config, agent: Agent) {
-  const protocol = await installProtocol(agent, config);
+export async function installContractInto(
+  config: Config,
+  agent: Agent,
+  opts: { force?: boolean } = {}
+): Promise<ContractInstall> {
+  const protocol = await installProtocol(agent, config, { force: opts.force });
   const skills = await installSkills(agent);
+
+  const changed: string[] = [];
+  if (protocol.wroteFile) changed.push(protocol.fileWasUpdated ? 'protocol file updated' : 'protocol file written');
+  if (protocol.wrotePointer) {
+    changed.push(protocol.forced ? 'a current pointer appended to CLAUDE.md' : 'pointer added to CLAUDE.md');
+  }
+  if (protocol.removedLegacy) changed.push('inline copy removed from CLAUDE.md');
+  for (const s of skills) {
+    if (s.wrote) changed.push(`${s.name} ${s.updated ? 'updated' : 'written'}`);
+  }
+
+  // Read back rather than infer. `installProtocol` declining to touch an edited
+  // pointer is a note, not a failure, and the only honest way to say whether this
+  // agent is now current is to ask the directory again.
+  const after = await protocolStatus(agent, config);
+  const skillsAfter = await skillStatus(agent);
+
   return {
-    protocol: {
-      wroteFile: protocol.wroteFile,
-      wrotePointer: protocol.wrotePointer,
-      removedLegacy: protocol.removedLegacy,
-      claudeMdMissing: protocol.claudeMdMissing,
-      notes: protocol.notes,
-    },
-    skills: skills.map((s) => ({ name: s.name, wrote: s.wrote, updated: s.updated })),
+    agent: agent.name,
+    changed,
+    notes: protocol.notes,
+    claudeMdMissing: protocol.claudeMdMissing,
+    /** Still edited after an install: only forcing gets past this one. */
+    blocked: after.pointerEdited,
+    ok: after.ok && skillsAfter.ok,
   };
 }
 
-export async function installContractFor(config: Config, body: Record<string, unknown>) {
-  const name = String(body.name ?? '').trim();
-  const agent = config.agents.find((a) => a.name.toLowerCase() === name.toLowerCase());
-  if (!agent) throw new BadRequest(`"${name}" is not in the roster.`);
-  return installAgentContract(config, agent);
+export interface ContractInstall {
+  agent: string;
+  /** What was written, in the words the CLI uses. Empty means already current. */
+  changed: string[];
+  notes: string[];
+  claudeMdMissing: boolean;
+  blocked: boolean;
+  ok: boolean;
+}
+
+/**
+ * The same thing across a set of agents — `agent protocol --all --install` and
+ * `agent skills --all --install` in one press.
+ *
+ * `--all` is the update path after pulling a new version of this repository, and it
+ * is the one that has to be in the dashboard: an operator who registered six
+ * directories through this page has no reason to know the two CLI commands that
+ * refresh them, and a stale `ledger-invocation` changes how every dispatch behaves
+ * without saying anything.
+ */
+export async function installContract(
+  config: Config,
+  body: Record<string, unknown>
+): Promise<{ results: ContractInstall[] }> {
+  const force = body.force === true || body.force === 'true';
+  const all = body.all === true || body.all === 'true';
+
+  let targets: Agent[];
+  if (all) {
+    targets = config.agents;
+    if (!targets.length) throw new BadRequest('The roster is empty — there is nowhere to install it.');
+  } else {
+    const name = String(body.name ?? '').trim();
+    const agent = config.agents.find((a) => a.name.toLowerCase() === name.toLowerCase());
+    if (!agent) throw new BadRequest(`"${name}" is not in the roster.`);
+    targets = [agent];
+  }
+
+  const results: ContractInstall[] = [];
+  for (const agent of targets) results.push(await installContractInto(config, agent, { force }));
+  return { results };
 }

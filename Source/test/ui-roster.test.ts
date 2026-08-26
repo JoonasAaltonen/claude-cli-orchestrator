@@ -81,6 +81,23 @@ test('the agents payload carries what the config form needs to render', async ()
       assert.ok(key in w, `${key} is missing from the agents payload`);
     }
     assert.ok(body.defaultModel, 'the model field shows the default as its placeholder');
+
+    // The contract block the Agents tab renders its chips, its problem list and its
+    // install button from. Nested, so the flat-key test below cannot see it: a rename
+    // here reads as `undefined` in a chip rather than as an error.
+    const c = w.contract;
+    for (const key of ['ok', 'version', 'protocol', 'skills', 'needsForce', 'problems', 'otherSkills']) {
+      assert.ok(key in c, `contract.${key} is missing from the agents payload`);
+    }
+    for (const half of ['protocol', 'skills'] as const) {
+      assert.ok('ok' in c[half] && typeof c[half].label === 'string', `contract.${half} has no label to render`);
+    }
+    // A fresh directory has neither, and the page says which — "missing" and "out of
+    // date" are different fixes and this is where the difference is decided.
+    assert.equal(c.ok, false);
+    assert.equal(c.protocol.label, 'protocol missing');
+    assert.equal(c.skills.label, 'skills missing');
+    assert.ok(c.problems.length, 'and it says what is wrong rather than only that something is');
   } finally {
     await s.close();
   }
@@ -190,7 +207,82 @@ test('installing the contract writes the protocol file and the skills', async ()
     const home = path.join(base, 'agents', 'worker');
     assert.ok((await fs.stat(path.join(home, '.claude', 'orchestrator-protocol.md'))).isFile());
     assert.match(await fs.readFile(path.join(home, 'CLAUDE.md'), 'utf8'), /orchestrator-protocol-ref/);
-    assert.ok(r.body.skills.length >= 2, 'both ledger skills are installed together, or one ends up not installed');
+    const one = r.body.results[0];
+    assert.equal(one.agent, 'worker');
+    assert.ok(one.ok, 'the state is read back off the directory, not inferred from the install');
+    assert.ok(
+      one.changed.some((c: string) => c.startsWith('ledger-invocation')) &&
+        one.changed.some((c: string) => c.startsWith('ledger-note')),
+      'both ledger skills are installed together, or one ends up not installed'
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+/**
+ * The reinstall-everything button, which is the one the dashboard exists to offer:
+ * after pulling a new version, every registered directory at once. A per-agent loop
+ * in the page would have been the same thing until one agent failed halfway.
+ */
+test('installing the contract into every agent reports one result each', async () => {
+  const { config, base } = await scratch();
+  const s = await serve(config);
+  try {
+    const added = await post(s, '/api/agents/add', { name: 'spare', home: path.join(base, 'agents', 'spare') });
+    assert.equal(added.status, 200, JSON.stringify(added.body));
+
+    const r = await post(s, '/api/agents/install', { all: true });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual(r.body.results.map((x: { agent: string }) => x.agent), ['worker', 'spare']);
+    for (const name of ['worker', 'spare']) {
+      const home = path.join(base, 'agents', name);
+      assert.ok((await fs.stat(path.join(home, '.claude', 'orchestrator-protocol.md'))).isFile());
+      assert.ok((await fs.stat(path.join(home, '.claude', 'skills', 'ledger-invocation', 'SKILL.md'))).isFile());
+    }
+
+    // Idempotent, and it says so: the update path is "run it again", so a second run
+    // reporting work it did not do would make the report worthless.
+    const again = await post(s, '/api/agents/install', { all: true });
+    assert.deepEqual(again.body.results.map((x: { changed: string[] }) => x.changed), [[], []]);
+
+    // And the payload the page renders its chips from agrees.
+    const { body } = await get(s, '/api/agents');
+    for (const g of body.agents) {
+      assert.ok(g.contract.ok, `${g.name} is current after installing`);
+      assert.deepEqual(g.contract.problems, []);
+    }
+  } finally {
+    await s.close();
+  }
+});
+
+/**
+ * An edited CLAUDE.md pointer is the one case installing declines to act on, so the
+ * dashboard has to be able to tell that state apart from a clean one — it is what
+ * decides whether the force option is offered at all.
+ */
+test('an edited pointer is left alone, reported, and only replaced when forced', async () => {
+  const { config, base } = await scratch();
+  const s = await serve(config);
+  const claudeMd = path.join(base, 'agents', 'worker', 'CLAUDE.md');
+  try {
+    await post(s, '/api/agents/install', { name: 'worker' });
+    const installed = await fs.readFile(claudeMd, 'utf8');
+    await writeText(claudeMd, installed.replace(/read/i, 'consult'));
+
+    const before = await get(s, '/api/agents');
+    assert.equal(before.body.agents[0].contract.needsForce, true);
+
+    const r = await post(s, '/api/agents/install', { name: 'worker' });
+    assert.equal(r.body.results[0].blocked, true, 'CLAUDE.md is the agent; a block that cannot be found is not guessed at');
+    assert.ok(r.body.results[0].notes.length, 'and it says why, rather than reporting nothing happened');
+
+    const forced = await post(s, '/api/agents/install', { name: 'worker', force: true });
+    assert.equal(forced.body.results[0].blocked, false);
+    const after = await fs.readFile(claudeMd, 'utf8');
+    assert.match(after, /consult/, 'the edited block is left exactly where it is');
+    assert.ok(after.match(/orchestrator-protocol-ref/g)!.length >= 2, 'a current pointer is appended beside it');
   } finally {
     await s.close();
   }

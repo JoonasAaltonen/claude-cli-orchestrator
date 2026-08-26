@@ -481,8 +481,88 @@ function paintRoster() {
   }).join('') || '<span class="muted">—</span>';
 }
 
+/**
+ * What the last install did, kept across the re-render it triggers.
+ *
+ * The panel is rebuilt from the server the moment an install finishes — that is the
+ * answer worth showing — and rebuilding it would otherwise throw away the report of
+ * what was just written, which is the other half of it.
+ */
+let lastInstall = null;
+
+function installReport(results) {
+  if (!results) return '';
+  return '<div style="margin-top:.6rem">' + results.map(function (r) {
+    const state = r.blocked
+      ? '<span class="chip warn">left alone</span>'
+      : r.ok ? '<span class="chip ok">current</span>' : '<span class="chip bad">not installed</span>';
+    return '<div style="margin-top:.4rem"><div class="row">' + state + '<strong>' + esc(r.agent) + '</strong>'
+      + '<span class="muted">' + esc(r.changed.length ? r.changed.join(', ') : 'already current') + '</span></div>'
+      + r.notes.map(function (n) { return '<div class="muted" style="font-size:.82rem">' + esc(n) + '</div>'; }).join('')
+      + '</div>';
+  }).join('') + '</div>';
+}
+
+/**
+ * The contract panel: `agent protocol --all --install` and `agent skills --all
+ * --install`, as one button.
+ *
+ * It is here rather than only beside each agent in Config because the case it exists
+ * for is the one that follows pulling a new version of this repository — every agent
+ * at once, and nothing to do with any one of them. A stale `ledger-invocation` is not
+ * cosmetic drift: its text is injected into every prompt, so an out-of-date copy
+ * quietly changes how each agent is handed its job.
+ */
+function contractPanel(a) {
+  const total = a.agents.length;
+  if (!total) return '';
+  const upToDate = a.agents.filter(function (g) { return g.contract.ok; }).length;
+  const edited = a.agents.filter(function (g) { return g.contract.needsForce; }).map(function (g) { return g.name; });
+  const version = a.agents[0].contract.version;
+
+  return '<div class="card" id="contract">'
+    + '<div class="row"><strong>Protocol and skills</strong>'
+    + '<span class="chip ' + (upToDate === total ? 'ok' : 'bad') + '">' + upToDate + ' of ' + total + ' current</span>'
+    + '<span class="grow"></span>'
+    + '<button class="plain" data-act="install-all">'
+    + (upToDate === total ? 'Reinstall into every agent' : 'Install into every agent') + '</button>'
+    + '</div>'
+    + '<div class="muted" style="margin-top:.45rem;font-size:.85rem">'
+    + 'Writes <span class="mono">.claude/orchestrator-protocol.md</span> (' + esc(version) + '), one line into each '
+    + '<span class="mono">CLAUDE.md</span> pointing at it, and the two ledger skills. This application owns those files and '
+    + 'replaces them wholesale, so this is the update path after pulling a new version. Agents&rsquo; own skills are never '
+    + 'touched, and nothing else in their directories is written.'
+    + '</div>'
+    + (edited.length
+        ? '<label class="cb" style="margin-top:.5rem"><input type="checkbox" id="forceInstall">'
+          + '<span>Append a current pointer where one has been edited by hand</span>'
+          + '<span class="hint muted">&mdash; ' + esc(edited.join(', ')) + '. The edited block stays exactly where it is, so that '
+          + 'agent reads two versions of the section until you delete one by hand.</span></label>'
+        : '')
+    + '<div id="contractResult">' + installReport(lastInstall) + '</div>'
+    + '</div>';
+}
+
+/**
+ * The page is read off disk on every request; the handlers are whatever the process
+ * loaded when it started. Edit this file under a running dashboard and the browser
+ * gets a new page talking to an old payload — which used to surface as a TypeError
+ * from inside a filter, pointing at the renderer rather than at the reason.
+ *
+ * One check, at the one boundary where the two meet.
+ */
+function requireCurrentServer(a) {
+  if (a.agents.length && !a.agents[0].contract) {
+    throw new Error(
+      'This dashboard is serving a newer page than the server it is talking to — restart '
+        + '`orchestrator ui` (and re-run `npm run build` first if you launched the linked command).'
+    );
+  }
+}
+
 async function renderAgents() {
   const a = await api('/api/agents');
+  requireCurrentServer(a);
   $('commsRoot').textContent = a.commsRoot;
   roster = a.agents;
   // The Config tab reads the same payload. refresh() calls this first on every tab,
@@ -490,25 +570,68 @@ async function renderAgents() {
   agentsData = a;
   paintRoster();
   $('agents').innerHTML = '<h2>Roster <span class="muted">(' + a.agents.length + ')</span></h2>'
+    + contractPanel(a)
     + (a.agents.length ? a.agents.map((g) => {
+        const c = g.contract;
         const flags = grantChips(g);
         if (reachesNetwork(g)) flags.push('<span class="chip warn">network</span>');
         if (!g.hooksAudited) flags.push('<span class="chip warn">hooks unaudited</span>');
         else if (g.hasPermissionHooks) flags.push('<span class="chip warn">has hooks</span>');
-        flags.push(g.protocolOk ? '<span class="chip ok">protocol ' + esc(g.protocolVersion || '') + '</span>' : '<span class="chip bad">protocol missing</span>');
-        flags.push(g.skillsOk ? '<span class="chip ok">skills</span>' : '<span class="chip bad">skills missing</span>');
-        return '<div class="card"><div class="row"><strong>' + esc(g.name) + '</strong>' + flags.join(' ') + '</div>'
+        // Both labels come from the server. The difference between "missing" and "out
+        // of date" is this application's judgement, and a page that re-derives it from
+        // a boolean is how two front-ends come to say different things about the same
+        // directory.
+        flags.push('<span class="chip ' + (c.protocol.ok ? 'ok' : 'bad') + '">' + esc(c.protocol.label) + '</span>');
+        flags.push('<span class="chip ' + (c.skills.ok ? 'ok' : 'bad') + '">' + esc(c.skills.label) + '</span>');
+        return '<div class="card"><div class="row"><strong>' + esc(g.name) + '</strong>' + flags.join(' ')
+          + '<span class="grow"></span>'
+          + '<button class="plain" data-act="install" data-name="' + esc(g.name) + '">'
+          + (c.ok ? 'Reinstall' : 'Install') + '</button></div>'
           + '<div class="muted mono">' + esc(g.home) + '</div>'
           + (g.description ? '<div>' + esc(g.description) + '</div>' : '')
           + '<div class="muted">tools: ' + esc(g.tools.join(', ')) + '</div>'
           + (g.paths.length ? '<div class="muted">' + g.paths.map(function (p) {
               return (p.write ? 'read+write' : 'read only') + ': ' + esc(p.path);
             }).join('<br>') + '</div>' : '')
-          + (g.otherSkills.length ? '<div class="muted">own skills, untouched: ' + esc(g.otherSkills.join(', ')) + '</div>' : '')
+          + (c.otherSkills.length ? '<div class="muted">own skills, untouched: ' + esc(c.otherSkills.join(', ')) + '</div>' : '')
+          + (c.problems.length ? '<div class="muted" style="margin-top:.35rem">' + c.problems.map(esc).join('<br>') + '</div>' : '')
           + '</div>';
       }).join('') : '<div class="empty">No agents registered. Use <span class="mono">orchestrator agent add</span>.</div>')
     + '<p class="muted mono">' + esc(a.configFile) + '</p>';
 }
+
+/**
+ * The two install buttons on this tab. Named actions rather than a catch-all, for the
+ * reason ROSTER_ACTIONS gives: a control added to this panel later should not fall
+ * through into this handler.
+ */
+document.addEventListener('click', function (e) {
+  const btn = e.target.closest('#agents [data-act]');
+  if (!btn || (btn.dataset.act !== 'install' && btn.dataset.act !== 'install-all')) return;
+  const all = btn.dataset.act === 'install-all';
+  // Only offered when some pointer has been edited by hand, so absent means false.
+  const force = !!($('forceInstall') && $('forceInstall').checked);
+  const label = btn.textContent;
+
+  btn.disabled = true;
+  btn.textContent = 'Installing…';
+  post('/api/agents/install', all ? { all: true, force: force } : { name: btn.dataset.name, force: force })
+    .then(function (r) {
+      lastInstall = r.results;
+      // Re-read rather than patch: the chips are read off the directories again, so
+      // what the panel shows afterwards is the filesystem's answer, not this one's.
+      agentsData = null;
+      return renderAgents();
+    })
+    .catch(function (err) {
+      reportCaught(err, 'install contract');
+      btn.disabled = false;
+      btn.textContent = label;
+      const at = $('contractResult');
+      if (at) at.innerHTML = '<div class="failed" style="margin-top:.5rem">' + esc(err.message) + '</div>';
+      else $('error').innerHTML = '<div class="banner">' + esc(err.message) + '</div>';
+    });
+});
 
 async function renderRuns() {
   const l = await api('/api/log');
@@ -797,7 +920,7 @@ function agentCard(g, cat, defaultModel) {
   const NL = String.fromCharCode(10);
   const flags = grantChips(g);
   if (reachesNetwork(g)) flags.push('<span class="chip warn">network</span>');
-  if (!g.protocolOk || !g.skillsOk) flags.push('<span class="chip bad">contract not installed</span>');
+  if (!g.contract.ok) flags.push('<span class="chip bad">contract not installed</span>');
 
   return '<details class="card agent" data-agent="' + esc(g.name) + '">'
     + '<summary><div class="row"><strong>' + esc(g.name) + '</strong>' + flags.join(' ')
@@ -809,7 +932,7 @@ function agentCard(g, cat, defaultModel) {
     + '<div class="actions">'
     + '<button type="button" class="go" data-act="save">Save</button>'
     + '<button type="button" class="plain" data-act="install">'
-    + (g.protocolOk && g.skillsOk ? 'Reinstall protocol and skills' : 'Install protocol and skills') + '</button>'
+    + (g.contract.ok ? 'Reinstall protocol and skills' : 'Install protocol and skills') + '</button>'
     + '<button type="button" class="plain danger" data-act="remove">Remove from roster</button>'
     + '<span class="grow"></span><span data-note></span>'
     + '</div></form></div></details>';
@@ -900,8 +1023,19 @@ document.addEventListener('click', function (e) {
       // still granted — it is just said out loud, once, at the moment of granting.
       note(form, r.warnings && r.warnings.length ? 'Saved — ' + r.warnings.join(' ') : 'Saved', !!(r.warnings && r.warnings.length));
     } else if (act === 'install') {
-      const r = await post('/api/agents/install', { name: name });
-      note(form, r.protocol.claudeMdMissing ? 'Installed, but there is no CLAUDE.md to point at it' : 'Installed');
+      // One agent through the same endpoint the Agents tab uses for all of them, so
+      // "installed" cannot mean two different things depending on which button was
+      // pressed. `ok` is read back off the directory afterwards: an install that
+      // declined to touch an edited pointer reports what it left alone rather than
+      // claiming success.
+      const one = (await post('/api/agents/install', { name: name })).results[0];
+      note(
+        form,
+        one.ok
+          ? (one.changed.length ? 'Installed — ' + one.changed.join(', ') : 'Already current')
+          : (one.notes[0] || 'Installed, but this agent is still not current — see the Agents tab'),
+        !one.ok
+      );
     } else if (act === 'remove') {
       if (!confirm('Remove ' + name + ' from the roster?' + NL + NL
         + 'Its directory is not touched, and the rows it already wrote stay in the ledger — nothing there is ever edited or deleted.')) return;
@@ -983,6 +1117,9 @@ function clock(iso) {
 document.querySelectorAll('nav button').forEach((b) => {
   b.addEventListener('click', () => {
     current = b.dataset.tab;
+    // The install report is about a moment, not a state. Leaving the tab ends it —
+    // the chips it explains are re-read from the directories on every render anyway.
+    lastInstall = null;
     document.querySelectorAll('nav button').forEach((x) => x.setAttribute('aria-selected', String(x === b)));
     ['now', 'ledger', 'agents', 'runs', 'config'].forEach((id) => { $(id).hidden = id !== current; });
     // The starter, the compose form and the run console belong to Now. Leaving them

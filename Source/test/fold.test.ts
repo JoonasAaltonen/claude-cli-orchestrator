@@ -124,7 +124,13 @@ test('M2: a non-blank Needs holds the row open until each named agent signs off'
     ),
     SETTINGS
   );
-  assert.deepEqual(f.openThreads, []);
+  assert.deepEqual(awaiting(f, 'reviewer'), []);
+  assert.deepEqual(awaiting(f, 'editor'), []);
+  // Both signatures are in, so the row returns to the agent that asked for them — once,
+  // carrying both, not once per signature.
+  const back = awaiting(f, 'coordinator');
+  assert.deepEqual(back.map((o) => o.reason), ['undelivered-answer']);
+  assert.deepEqual(back[0]!.answeredBy.map((r) => r.id), ['0002', '0003']);
 });
 
 test('M5: two rejections halt the thread and it stops being dispatchable', () => {
@@ -536,18 +542,78 @@ test('a report from one recipient does not discharge that recipient', () => {
   assert.deepEqual(awaiting(f, 'researcher').map((o) => o.row.id), ['0002'], 'still owed');
 });
 
-test('an agent-started chain closes without anyone reporting to the operator', () => {
-  // Not a defect in the fold: a response closes a request and owes nothing further.
-  // It is a property of the shape, and it matters because the human who set this off
-  // in conversation is not in the ledger anywhere, so nothing is addressed to them.
+/**
+ * The shape this rule exists for, and it was measured before it was written.
+ *
+ * On the live ledger: PR asked Research for a survey (row 0041, no `replyTo` — PR
+ * opened the thread itself), Research delivered it (0043, `done`). The fold reported
+ * nothing outstanding, `dispatch.jsonl` recorded no invocation of PR afterwards, and
+ * the survey sat in a closed thread. Nothing failed. The work simply stopped, with
+ * the agent that asked for it never told it had arrived.
+ *
+ * `blockedBy` hid this for as long as it did because the delegation shape works: when
+ * the requester is itself answering something, its parent row brings it back. That is
+ * the OPERATOR_STARTED fixture above. It only fails when the requester started the
+ * thread — which is every request an agent makes on its own initiative.
+ */
+test('an agent-started chain returns to the requester once it is answered', () => {
   const f = fold(AGENT_STARTED, SETTINGS);
-  assert.deepEqual(awaiting(f, 'coordinator'), [], 'nobody is dispatched to summarise');
-  assert.deepEqual(awaiting(f, 'worker'), []);
-  assert.equal(f.openThreads.length, 0, 'the chain is simply over');
 
-  // Nothing in the thread is addressed to the operator at all.
-  const toOperator = AGENT_STARTED.filter((r) => r.to.includes('operator'));
-  assert.deepEqual(toOperator, [], 'which is exactly why /ledger-note warns about it');
+  const back = awaiting(f, 'coordinator');
+  assert.deepEqual(back.map((o) => o.row.id), ['0001'], 'the requester is pulled back in');
+  assert.equal(back[0]!.reason, 'undelivered-answer');
+  assert.deepEqual(back[0]!.answeredBy.map((r) => r.id), ['0002'], 'and is handed the answer');
+  assert.deepEqual(awaiting(f, 'worker'), [], 'the worker owes nothing further');
+  assert.equal(f.openThreads.length, 1, 'the thread is not over until someone reads the answer');
+});
+
+test('any row from the requester discharges it — that is what picking it up means', () => {
+  const f = fold(
+    AGENT_STARTED.concat(
+      rows(
+        '0003 ; 2026-08-22T09:30:00Z ; coordinator ; operator ; report ; 0001 ;  ;  ; messages\\0003-c.md ; Filed it, here is where it landed'
+      )
+    ),
+    SETTINGS
+  );
+  assert.deepEqual(awaiting(f, 'coordinator'), [], 'it has been picked up');
+  assert.equal(f.openThreads.length, 0, 'and now the chain is over');
+  assert.equal(f.awaitingBy.size, 0, 'with nothing left to dispatch');
+});
+
+test('the requester is not invoked twice for one answer it has already read', () => {
+  // The discharging row does not have to be addressed to anyone in particular, and
+  // does not have to reply to the request. Anything the requester writes into the
+  // thread is evidence it saw the answer.
+  const f = fold(
+    AGENT_STARTED.concat(
+      rows(
+        '0003 ; 2026-08-22T09:30:00Z ; coordinator ; reviewer ; request ; 0002 ;  ;  ; messages\\0003-c.md ; Check this before I file it'
+      )
+    ),
+    SETTINGS
+  );
+  assert.deepEqual(
+    awaiting(f, 'coordinator'),
+    [],
+    'the coordinator acted on it; the ball is with the reviewer now'
+  );
+  assert.deepEqual(awaiting(f, 'reviewer').map((o) => o.row.id), ['0003']);
+});
+
+test('an answer to the operator ends the chain — the human is not dispatchable', () => {
+  // An item resting on a party that can never be invoked would never be discharged:
+  // every finished thread would read as open forever, and L7 would call all of them
+  // stale three days later.
+  const f = fold(
+    rows(
+      '0001 ; 2026-08-22T09:00:00Z ; operator ; worker ; request ;  ;  ;  ; messages\\0001-a.md ; Please do the thing',
+      '0002 ; 2026-08-22T09:20:00Z ; worker ; operator ; response ; 0001 ;  ; done ; messages\\0002-b.md ; Done, the file is at X'
+    ),
+    SETTINGS
+  );
+  assert.equal(f.awaitingBy.size, 0, 'nothing is waiting on anyone');
+  assert.equal(f.openThreads.length, 0);
 });
 
 /**
@@ -603,4 +669,115 @@ test('an information row is not a decision and stays out of the digest', () => {
   // prompt in the system.
   const f = fold(INFORMATION, SETTINGS);
   assert.deepEqual(f.decisions, []);
+});
+/**
+ * `deliverable` and `partial` — the two shapes the return leg exists to carry.
+ *
+ * A `deliverable` is a response that produced something and says where it is. It has
+ * to discharge the request exactly as a response does: a new answering type the fold
+ * does not recognise fails in the worst way available — the answer lands, the request
+ * stays outstanding, and the agent that already did the work is invoked to do it
+ * again. That is why `ANSWERING_TYPES` is derived from the type table rather than
+ * spelled out here.
+ */
+test('a deliverable discharges a request exactly as a response does', () => {
+  const f = fold(
+    rows(
+      '0001 ; 2026-08-22T09:00:00Z ; coordinator ; worker ; request ;  ;  ;  ; messages\\0001-a.md ; Write the survey',
+      '0002 ; 2026-08-22T09:20:00Z ; worker ; coordinator ; deliverable ; 0001 ;  ; done ; messages\\0002-b.md ; Survey at C:\\Shared\\survey.md'
+    ),
+    SETTINGS
+  );
+  assert.deepEqual(awaiting(f, 'worker'), [], 'the worker is finished');
+  const back = awaiting(f, 'coordinator');
+  assert.deepEqual(back.map((o) => o.reason), ['undelivered-answer']);
+  assert.deepEqual(back[0]!.answeredBy.map((r) => r.type), ['deliverable']);
+});
+
+test('a partial answer closes the request and returns it, like any other outcome', () => {
+  // `partial` must close. An outcome that reported work-not-done without discharging
+  // the row would put the agent that already said it could not finish back in the
+  // queue to try again, which is the one thing it just said would not work.
+  const f = fold(
+    rows(
+      '0001 ; 2026-08-22T09:00:00Z ; coordinator ; worker ; request ;  ;  ;  ; messages\\0001-a.md ; Survey fifteen sites',
+      '0002 ; 2026-08-22T09:20:00Z ; worker ; coordinator ; deliverable ; 0001 ;  ; partial ; messages\\0002-b.md ; Twelve done, three unreachable'
+    ),
+    SETTINGS
+  );
+  assert.deepEqual(awaiting(f, 'worker'), []);
+  assert.deepEqual(awaiting(f, 'coordinator').map((o) => o.reason), ['undelivered-answer']);
+});
+
+/**
+ * M5's ceiling, and the loop it could not previously see.
+ *
+ * A `request` carries no outcome (M1), so a requester that reads a refusal and asks
+ * again produces a round the counter never counted. On the live ledger the counter
+ * had never fired once: 43 rows, no `rejected` at all, and two permission walls
+ * reported inside `done` bodies.
+ */
+test('a blocked answer alone is not a rejection round', () => {
+  const f = fold(
+    rows(
+      '0001 ; 2026-08-22T09:00:00Z ; coordinator ; worker ; request ;  ;  ;  ; messages\\0001-a.md ; Fetch the figures',
+      '0002 ; 2026-08-22T09:20:00Z ; worker ; coordinator ; response ; 0001 ;  ; blocked ; messages\\0002-b.md ; No web tool in my grants'
+    ),
+    SETTINGS
+  );
+  assert.equal(f.threads[0]!.rejectionCount, 0, 'reporting a wall correctly is not a refusal');
+  assert.equal(f.threads[0]!.halted, false);
+});
+
+test('re-asking the agent that just hit a wall counts towards the ceiling', () => {
+  const base = [
+    '0001 ; 2026-08-22T09:00:00Z ; coordinator ; worker ; request ;  ;  ;  ; messages\\0001-a.md ; Fetch the figures',
+    '0002 ; 2026-08-22T09:20:00Z ; worker ; coordinator ; response ; 0001 ;  ; blocked ; messages\\0002-b.md ; No web tool in my grants',
+    '0003 ; 2026-08-22T09:30:00Z ; coordinator ; worker ; request ; 0002 ;  ;  ; messages\\0003-c.md ; Please try again',
+  ];
+  let f = fold(rows(...base), SETTINGS);
+  assert.equal(f.threads[0]!.rejectionCount, 1);
+  assert.equal(f.threads[0]!.halted, false, 'one round is not a halt — the grant may have changed');
+
+  f = fold(
+    rows(
+      ...base,
+      '0004 ; 2026-08-22T09:40:00Z ; worker ; coordinator ; response ; 0003 ;  ; blocked ; messages\\0004-d.md ; Still no web tool',
+      '0005 ; 2026-08-22T09:50:00Z ; coordinator ; worker ; request ; 0004 ;  ;  ; messages\\0005-e.md ; Try once more'
+    ),
+    SETTINGS
+  );
+  assert.equal(f.threads[0]!.rejectionCount, 2);
+  assert.equal(f.threads[0]!.halted, true, 'M5 stops it and escalates rather than looping');
+  assert.equal(f.awaitingBy.size, 0, 'nothing is dispatched from a halted thread');
+});
+
+test('re-routing to a different agent after a wall is not a rejection round', () => {
+  // The instruction the requester is given is to re-route, so doing it must not be
+  // what trips the ceiling.
+  const f = fold(
+    rows(
+      '0001 ; 2026-08-22T09:00:00Z ; coordinator ; worker ; request ;  ;  ;  ; messages\\0001-a.md ; Fetch the figures',
+      '0002 ; 2026-08-22T09:20:00Z ; worker ; coordinator ; response ; 0001 ;  ; blocked ; messages\\0002-b.md ; No web tool in my grants',
+      '0003 ; 2026-08-22T09:30:00Z ; coordinator ; researcher ; request ; 0002 ;  ;  ; messages\\0003-c.md ; You have web — can you'
+    ),
+    SETTINGS
+  );
+  assert.equal(f.threads[0]!.rejectionCount, 0);
+  assert.deepEqual(awaiting(f, 'researcher').map((o) => o.row.id), ['0003']);
+});
+
+test('asking again after a partial answer is not a rejection round', () => {
+  // The whole point of `partial` is that re-stating the ask differently is the right
+  // move. Counting it would halt the thread for doing what it was told to do.
+  const f = fold(
+    rows(
+      '0001 ; 2026-08-22T09:00:00Z ; coordinator ; worker ; request ;  ;  ;  ; messages\\0001-a.md ; Survey fifteen sites',
+      '0002 ; 2026-08-22T09:20:00Z ; worker ; coordinator ; deliverable ; 0001 ;  ; partial ; messages\\0002-b.md ; Twelve done, three unreachable',
+      '0003 ; 2026-08-22T09:30:00Z ; coordinator ; worker ; request ; 0002 ;  ;  ; messages\\0003-c.md ; Three replacements, blog pages not homepages'
+    ),
+    SETTINGS
+  );
+  assert.equal(f.threads[0]!.rejectionCount, 0);
+  assert.equal(f.threads[0]!.halted, false);
 });

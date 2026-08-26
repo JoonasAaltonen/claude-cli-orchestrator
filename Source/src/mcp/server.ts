@@ -44,7 +44,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { loadConfig, findAgent } from '../config/load.js';
 import type { Agent, Config } from '../config/load.js';
-import { MESSAGE_TYPES, MESSAGE_TYPE_INFO, OUTCOMES } from '../ledger/row.js';
+import { MESSAGE_TYPES, MESSAGE_TYPE_INFO, OUTCOMES, OUTCOME_INFO, answeringTypeList } from '../ledger/row.js';
 import { parseMessageText, renderMessageFile } from '../ledger/message.js';
 import type { MessageDraft } from '../ledger/message.js';
 import { readIndex } from '../ledger/store.js';
@@ -112,8 +112,15 @@ const TOOL_SCHEMA = {
       outcome: {
         type: 'string',
         enum: [...OUTCOMES],
+        // Generated for the same reason the type list above is: the hand-written
+        // sentence here said "response or signoff" and named only `rejected`'s body
+        // rule, and went stale the moment either enumeration grew.
         description:
-          'Required on a response or signoff, and forbidden on anything else. A "rejected" outcome must say in the body exactly what would make it pass.',
+          `Required on a ${answeringTypeList()} message, and forbidden on anything else.\n`
+          + OUTCOMES.map((o) => {
+            const info = OUTCOME_INFO[o];
+            return `${o} — ${info.what}${info.requiresBody ? ' The body must say why.' : ''}`;
+          }).join('\n'),
       },
       summary: {
         type: 'string',

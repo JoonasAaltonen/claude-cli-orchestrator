@@ -39,10 +39,10 @@
  */
 import { z } from 'zod';
 
-export const MESSAGE_TYPES = ['report', 'request', 'response', 'signoff', 'decision', 'information'] as const;
+export const MESSAGE_TYPES = ['report', 'request', 'response', 'deliverable', 'signoff', 'decision', 'information'] as const;
 export type MessageType = (typeof MESSAGE_TYPES)[number];
 
-export const OUTCOMES = ['done', 'deferred', 'rejected', 'blocked'] as const;
+export const OUTCOMES = ['done', 'partial', 'deferred', 'rejected', 'blocked'] as const;
 export type Outcome = (typeof OUTCOMES)[number];
 
 /**
@@ -55,10 +55,16 @@ export type Outcome = (typeof OUTCOMES)[number];
  * once or not at all. Adding `information` cost five hand-edits in five files, which
  * is the mistake this closes.
  *
- * Agent-facing prose in `templates/prompt/v1.md` is deliberately *not* generated
- * from here. D8 makes that template a versioned interface an operator may rewrite;
- * a generated block inside it would be overwritten or, worse, silently disagree.
- * `doctor` cross-checks the two instead.
+ * Agent-facing prose in `templates/prompt/v1.md` and `templates/agent-protocol.md` is
+ * deliberately *not* generated from here. D8 makes those a versioned interface an
+ * operator may rewrite; a generated block inside one would be overwritten or, worse,
+ * silently disagree with the prose around it.
+ *
+ * They are checked instead, in test/vocabulary.test.ts: every name in the enumerations
+ * below must appear somewhere in both templates. Weak on purpose — presence, not
+ * wording, because the wording is the operator's. It exists because "not generated"
+ * had been read as "not checked", and both templates were listing six types and four
+ * outcomes that no longer matched this file.
  */
 export interface MessageTypeInfo {
   /** One line, for whoever is choosing a type — an agent or the operator. */
@@ -67,8 +73,24 @@ export interface MessageTypeInfo {
   outcome: 'required' | 'forbidden';
   /** Whether it must name the row it answers. */
   replyTo: 'required' | 'optional';
-  /** Does a row of this type, addressed to an agent, cause that agent to be invoked? */
+  /**
+   * Does a row of this type, addressed to an agent, cause that agent to be invoked?
+   *
+   * True for three different reasons, which is why this is documentation rather than
+   * the thing the fold switches on: a `request` is outstanding until answered, an
+   * `information` until acknowledged, and an answering type until the agent that
+   * asked has read it. The fold implements all three separately.
+   */
   dispatched: boolean;
+  /**
+   * Does a row of this type discharge a request addressed to its writer?
+   *
+   * The fold reads this rather than naming types, because a new answering type that
+   * the fold does not recognise fails in the worst possible way: the answer lands,
+   * the requester is never released, and the thread reads as open forever with the
+   * work already done.
+   */
+  answers: boolean;
 }
 
 export const MESSAGE_TYPE_INFO: Readonly<Record<MessageType, MessageTypeInfo>> = {
@@ -77,51 +99,153 @@ export const MESSAGE_TYPE_INFO: Readonly<Record<MessageType, MessageTypeInfo>> =
     outcome: 'forbidden',
     replyTo: 'optional',
     dispatched: true,
+    answers: false,
   },
   response: {
     what: 'Answering a request addressed to you.',
     outcome: 'required',
     replyTo: 'required',
-    dispatched: false,
+    dispatched: true,
+    answers: true,
+  },
+  deliverable: {
+    what: 'Answering a request by producing something. Same as a response, and names where the artefact is.',
+    outcome: 'required',
+    replyTo: 'required',
+    dispatched: true,
+    answers: true,
   },
   report: {
     what: 'Stating what happened. Closes nothing, expects no answer.',
     outcome: 'forbidden',
     replyTo: 'optional',
     dispatched: false,
+    answers: false,
   },
   signoff: {
     what: "Approving or rejecting someone else's work, where a `needs` field asked for it.",
     outcome: 'required',
     replyTo: 'required',
-    dispatched: false,
+    dispatched: true,
+    answers: true,
   },
   decision: {
     what: 'Settling something future work should not re-open. Shown to every agent afterwards.',
     outcome: 'forbidden',
     replyTo: 'optional',
     dispatched: false,
+    answers: false,
   },
   information: {
     what: 'A fact worth keeping, for the recipient to record in their own notes.',
     outcome: 'forbidden',
     replyTo: 'optional',
     dispatched: true,
+    answers: false,
   },
 };
 
-/** M1: `Outcome` appears on `response` and `signoff` rows only. Derived, not restated. */
+/** M1: `Outcome` appears on the answering types only. Derived, not restated. */
 export const OUTCOME_TYPES: ReadonlySet<string> = new Set(
   MESSAGE_TYPES.filter((t) => MESSAGE_TYPE_INFO[t].outcome === 'required')
 );
 
-/** What each outcome claims. Shown beside the field wherever one is chosen. */
-export const OUTCOME_INFO: Readonly<Record<Outcome, string>> = {
-  done: 'The work is finished.',
-  deferred: 'Not now, and not refused — say in the body what it is waiting for.',
-  rejected: 'Refused. The body must state the specific change that would make it pass.',
-  blocked: 'Something stopped it. The body must say precisely what.',
+/** The types that discharge a request. Derived, so a new one cannot be forgotten. */
+export const ANSWERING_TYPES: ReadonlySet<string> = new Set(
+  MESSAGE_TYPES.filter((t) => MESSAGE_TYPE_INFO[t].answers)
+);
+
+/** A readable list of the answering types, for error text and agent-facing prose. */
+export function answeringTypeList(): string {
+  const names = MESSAGE_TYPES.filter((t) => MESSAGE_TYPE_INFO[t].answers);
+  if (names.length < 2) return names.join('');
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
+export interface OutcomeInfo {
+  /** What the outcome claims. Shown beside the field wherever one is chosen. */
+  what: string;
+  /**
+   * Does it discharge the request? Every outcome does today, and the field exists so
+   * that a future one which does not cannot be added silently — an outcome wrongly
+   * assumed to close leaves the answerer holding a row it believes it has finished.
+   */
+  closes: boolean;
+  /**
+   * Must the body justify it? M4 is the original case — "a bare rejection costs a
+   * full invocation and returns the same problem" — and the same reasoning applies
+   * to every outcome that reports work not done. Without the reason, the requester's
+   * only move is to ask again.
+   */
+  requiresBody: boolean;
+  /**
+   * What the agent that asked should do on receiving an answer that closes this way.
+   *
+   * This is the point of the requester's invocation. It is per-outcome because the
+   * right move differs sharply: an answer that came back `blocked` must not be
+   * re-sent to the same agent, and one that came back `partial` often should be, in
+   * different words. A cold requester has no way to work that out for itself.
+   */
+  onReceipt: string;
+}
+
+export const OUTCOME_INFO: Readonly<Record<Outcome, OutcomeInfo>> = {
+  done: {
+    what: 'The work is finished.',
+    closes: true,
+    requiresBody: false,
+    onReceipt: 'Use it. Say what you did with it, or what happens next.',
+  },
+  partial: {
+    what: 'Some of it is done and some is not. The body must say which parts, and why the rest is not.',
+    closes: true,
+    requiresBody: true,
+    onReceipt:
+      'Take what is there and read why the rest is not. If the reason was that the ask was'
+      + ' not understood, re-state it differently — do not repeat it unchanged. If the reason'
+      + ' was something the agent cannot get past, do not send that part back to them at all.',
+  },
+  deferred: {
+    what: 'Not now, and not refused — say in the body what it is waiting for.',
+    closes: true,
+    requiresBody: true,
+    onReceipt:
+      'Not refused, and not now. The body says what it is waiting for. Do not restart it —'
+      + ' note what it waits on and move whatever does not depend on it.',
+  },
+  rejected: {
+    what: 'Refused. The body must state the specific change that would make it pass.',
+    closes: true,
+    requiresBody: true,
+    onReceipt:
+      'The body names the specific change that would make it pass. That change is the only'
+      + ' thing to act on; re-sending it unchanged returns the same refusal.',
+  },
+  blocked: {
+    what: 'Something stopped it. The body must say precisely what.',
+    closes: true,
+    requiresBody: true,
+    onReceipt:
+      'Do not send this back to the same agent. The body names what stopped it, and if that'
+      + ' is a tool, a path or a permission they do not hold, no rewording of the request will'
+      + ' change it — the fix is configuration, and neither of you can apply it. Re-route to an'
+      + ' agent that holds what is missing, or report it to the operator naming exactly what'
+      + ' was missing and who needed it.',
+  },
 };
+
+/**
+ * The outcomes that discharge a request. Derived from OUTCOME_INFO so that adding an
+ * outcome without saying whether it closes does not compile.
+ */
+export const CLOSING_OUTCOMES: ReadonlySet<string> = new Set(
+  OUTCOMES.filter((o) => OUTCOME_INFO[o].closes)
+);
+
+/** The outcomes whose body must justify them. Derived for the same reason. */
+export const BODY_REQUIRED_OUTCOMES: ReadonlySet<string> = new Set(
+  OUTCOMES.filter((o) => OUTCOME_INFO[o].requiresBody)
+);
 
 /** Reserved participant names. Neither is an agent; neither is ever a dispatch target. */
 export const OPERATOR = 'operator';

@@ -1,4 +1,4 @@
-<!-- orchestrator-protocol:v6 -->
+<!-- orchestrator-protocol:v7 -->
 ## Working through the orchestrator
 
 Some of your sessions are started by a tool, not by a person typing at you. You can
@@ -38,9 +38,9 @@ wrong answer costs more than a refusal, because nobody catches it.
 ```markdown
 ---
 to: <recipient name, or several joined with +>
-type: request | response | report | signoff | decision | information
+type: request | response | deliverable | report | signoff | decision | information
 replyTo: <the row ID you are answering, if any — e.g. 0002>
-outcome: done | deferred | rejected | blocked
+outcome: done | partial | deferred | rejected | blocked
 summary: One line saying what this is. Any punctuation is fine.
 ---
 
@@ -48,8 +48,21 @@ The substance. Write it for someone who has not read the thread, because whoever
 reads it next may be as cold as you were.
 ```
 
-- `outcome` is required on `response` and `signoff`, and must not appear on anything else.
+- `outcome` is required on `response`, `deliverable` and `signoff`, and must not appear
+  on anything else.
 - `replyTo` is required whenever you are answering something.
+- A **`deliverable`** is a `response` that produced something — a document, a draft, a
+  review, code. Everything a response needs, plus a body that says **where the artefact
+  is**. Use it whenever the work exists somewhere other than the message itself; that
+  is what tells the reader there is a file to open.
+- **`outcome: partial`** is for a request you satisfied some of. Say which parts are
+  done, which are not, and why not for each. It closes the row exactly as `done` does,
+  so you will not be asked again — what it changes is that the person who asked can see
+  the gap now rather than discovering it later and asking from scratch. Reporting
+  `done` on work you only partly did is the failure this exists to prevent.
+  Be exact about the reason, because it decides what happens next: *"I did not
+  understand what was wanted"* invites a better-worded second ask, and *"I do not have
+  that tool"* does not, because no rewording will fix it.
 - An `information` message is delivered to whoever it is addressed to and stays open
   until they reply. If one arrives for you, no work is being asked: decide whether the
   fact is worth keeping, then close it with a one-line `report`. A report carries no
@@ -87,9 +100,15 @@ outstanding, and when the last one is answered it hands you the whole thread —
 instructions, your requests and every reply — so you can write the answer that closes
 it.
 
-A recipient discharges your request by answering it with a `response` carrying an
-outcome — or a `signoff`, where you asked for one. Their `report` does not: the row
-still waits on them.
+A recipient discharges your request by answering it with a `response` or a
+`deliverable` carrying an outcome — or a `signoff`, where you asked for one. Their
+`report` does not: the row still waits on them.
+
+**This is also true of a thread you started yourself.** If you send a request that is
+not a reply to anything — something you decided to ask on your own initiative — you
+will be invoked again once it is answered, handed your own request and the reply
+together. That invocation is not a repeat of the work: it is the point at which the
+answer gets used. See *When something you asked for comes back*, below.
 
 Answering the row now is what breaks this. Any `response` closes it, including
 `outcome: deferred`, and the replies you asked for then arrive with nobody left to
@@ -105,6 +124,39 @@ answer normally — the row stays open until each one signs off.
 If your file is malformed the orchestrator rejects it before it reaches the ledger,
 preserves it, and sends you back a message naming exactly what was wrong. Nothing is
 lost, and whatever was waiting on you is still waiting.
+
+### When something you asked for comes back
+
+You will sometimes be invoked with a row **you wrote yourself**, marked *your own
+request*, alongside the answer to it. You are cold and will not remember writing it.
+
+**It is not new work and you must not do it again.** You are being invoked because the
+answer arrived and nothing has been done with it — that is the only reason the thread
+is still moving. Read it, do whatever you asked for it in order to do, and write one
+message into the thread. That is what closes it; write nothing and you will be invoked
+again with the same answer.
+
+What that message should be depends on the outcome the answer carried:
+
+- **`done`** — use it. Say what you did with it and where that landed.
+- **`partial`** — take what is there, and read why the rest is not. If the reason was
+  that the ask was not understood, re-state it differently; do not send it back
+  unchanged. If the reason was something they cannot get past, do not send that part
+  back to them at all.
+- **`blocked`** — **do not send this back to the same agent.** If what stopped them was
+  a tool, a path or a permission they do not hold, no rewording of the request will
+  change it: the fix is configuration, and neither of you can apply it. Send it to an
+  agent that does hold what is missing, or report it to `operator` naming exactly what
+  was missing and who needed it. Asking twice more after a wall stops the thread
+  entirely and escalates it to the human.
+- **`rejected`** — the body names the specific change that would make it pass. That
+  change is the only thing to act on.
+- **`deferred`** — not refused, and not now. Note what it is waiting for and move
+  whatever does not depend on it.
+
+If the work it fed is finished and nobody else is waiting, the closing message is a
+`report` to `operator`. A chain that finishes without ever addressing the human is a
+chain whose result nobody was told about.
 
 ---
 

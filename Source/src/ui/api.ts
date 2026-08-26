@@ -16,8 +16,10 @@ import { readIndex, readMessageBody } from '../ledger/store.js';
 import type { Row } from '../ledger/row.js';
 import { OPERATOR } from '../ledger/row.js';
 import type { Config } from '../config/load.js';
-import { protocolStatus } from '../cli/protocol.js';
+import { protocolStatus, PROTOCOL_VERSION, PROTOCOL_REL } from '../cli/protocol.js';
+import type { ProtocolStatus } from '../cli/protocol.js';
 import { skillStatus } from '../cli/skills.js';
+import type { SkillStatus } from '../cli/skills.js';
 import { readInvocationLog } from '../log/invocations.js';
 import { buildPermissionPlan } from '../dispatch/permissions.js';
 import { TOOL_CATALOGUE, TOOL_GROUPS, GRANT_CATALOGUE, GRANT_FIELDS } from '../roster/edit.js';
@@ -209,6 +211,58 @@ export async function threadPayload(config: Config, id: string) {
   return { ...threadSummary(thread), rows };
 }
 
+/**
+ * Where an agent stands on the agent-side half of the contract — the protocol file,
+ * the CLAUDE.md pointer, and the two ledger skills.
+ *
+ * The labels and the problem list are built here rather than in the page, for the
+ * reason the rationale block is: the difference between "missing" and "out of date"
+ * is this application's judgement, and a page that re-derives it from a boolean is a
+ * second opinion that can disagree with `orchestrator agent protocol`. The page
+ * renders what it is told.
+ */
+function contractPayload(p: ProtocolStatus, s: SkillStatus) {
+  const problems: string[] = [];
+
+  if (!p.fileInstalled) problems.push(`No ${PROTOCOL_REL.replace(/\\/g, '/')} — this agent has no standing instructions about the ledger.`);
+  else if (p.fileStale) problems.push(`The protocol file is not the one this version ships, or this agent's grants have changed since it was written.`);
+
+  if (!p.claudeMdPresent) problems.push('There is no CLAUDE.md here to point at the protocol file.');
+  else if (!p.pointerPresent) problems.push('CLAUDE.md does not point at the protocol file, so nothing sends this agent to it.');
+  else if (p.pointerEdited) problems.push('The CLAUDE.md pointer has been edited since it was written, so installing leaves it alone. Forcing appends a current one beside it, and the edited one stays for you to delete.');
+  else if (p.pointerStale) problems.push(`The CLAUDE.md pointer is ${p.pointerVersion ?? 'unversioned'}; the current one is ${PROTOCOL_VERSION}.`);
+
+  if (p.legacyInline) problems.push('The protocol text is pasted into CLAUDE.md. Installing moves it to a file, where it can be replaced on update.');
+
+  const missing = s.skills.filter((x) => !x.installed).map((x) => x.name);
+  const stale = s.skills.filter((x) => x.installed && x.stale).map((x) => x.name);
+  if (missing.length) problems.push(`Not installed: ${missing.join(', ')}.`);
+  if (stale.length) problems.push(`Out of date: ${stale.join(', ')}.`);
+
+  return {
+    ok: p.ok && s.ok,
+    /** What a current installation would be, so the page never names a version. */
+    version: PROTOCOL_VERSION,
+    protocol: {
+      ok: p.ok,
+      label: p.ok
+        ? `protocol ${p.fileVersion ?? PROTOCOL_VERSION}`
+        : !p.fileInstalled && !p.pointerPresent
+          ? 'protocol missing'
+          : 'protocol out of date',
+    },
+    skills: {
+      ok: s.ok,
+      label: s.ok ? 'skills' : s.none ? 'skills missing' : 'skills out of date',
+    },
+    /** An edited pointer is the one case installing declines to act on its own. */
+    needsForce: p.pointerEdited,
+    problems,
+    /** Listed, never touched — X3a's writable row is what agents keep their own in. */
+    otherSkills: s.otherSkills,
+  };
+}
+
 export async function agentsPayload(config: Config) {
   const out = [];
   for (const a of config.agents) {
@@ -244,10 +298,7 @@ export async function agentsPayload(config: Config) {
       rationale: buildPermissionPlan(config, a).rationale.map((r) => r.what),
       hooksAudited: a.hasPermissionHooks !== null,
       hasPermissionHooks: a.hasPermissionHooks,
-      protocolOk: p.ok,
-      protocolVersion: p.fileVersion,
-      skillsOk: s.ok,
-      otherSkills: s.otherSkills,
+      contract: contractPayload(p, s),
     });
   }
   return {
@@ -271,7 +322,7 @@ export async function agentsPayload(config: Config) {
 export function metaPayload() {
   return {
     messageTypes: MESSAGE_TYPES.map((name) => ({ name, ...MESSAGE_TYPE_INFO[name] })),
-    outcomes: OUTCOMES.map((name) => ({ name, what: OUTCOME_INFO[name] })),
+    outcomes: OUTCOMES.map((name) => ({ name, ...OUTCOME_INFO[name] })),
     grants: GRANT_FIELDS.map((field) => ({ field, ...GRANT_CATALOGUE[field] })),
     tools: TOOL_CATALOGUE,
     toolGroups: Object.entries(TOOL_GROUPS).map(([group, label]) => ({ group, label })),

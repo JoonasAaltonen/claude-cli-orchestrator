@@ -7,6 +7,7 @@
  */
 import type { Config } from '../config/load.js';
 import type { Fold, Thread, Outstanding } from '../ledger/fold.js';
+import { REASON_INFO } from '../ledger/fold.js';
 import type { Row } from '../ledger/row.js';
 import { formatDuration } from '../util/time.js';
 
@@ -44,6 +45,7 @@ export function typeBadge(t: string): string {
   switch (t) {
     case 'request': return blue('request');
     case 'response': return green('response');
+    case 'deliverable': return green('deliverable');
     case 'report': return dim('report');
     case 'signoff': return green('signoff');
     case 'decision': return yellow('decision');
@@ -55,6 +57,7 @@ export function typeBadge(t: string): string {
 export function outcomeBadge(o: string): string {
   switch (o) {
     case 'done': return green('done');
+    case 'partial': return yellow('partial');
     case 'rejected': return red('rejected');
     case 'blocked': return red('blocked');
     case 'deferred': return yellow('deferred');
@@ -141,12 +144,7 @@ export function renderInbox(who: string, items: Outstanding[], f: Fold): string 
     const t = f.threadOf.get(o.row.id);
     out.push(`  ${bold(o.row.id)} ${typeBadge(o.row.type)} ${dim('from')} ${o.row.writer}`);
     out.push(`     ${o.row.summary}`);
-    const why =
-      o.reason === 'awaiting-signoff'
-        ? 'your sign-off is required'
-        : o.reason === 'unread-information'
-          ? 'information to note, unacknowledged'
-          : 'unanswered request';
+    const why = REASON_INFO[o.reason].short;
     out.push(`     ${dim(why)}${t ? dim(`  ·  thread ${t.rootId}, ${t.rows.length} row(s)`) : ''}`);
     if (o.row.ref) out.push(`     ${dim(o.row.ref)}`);
     out.push('');

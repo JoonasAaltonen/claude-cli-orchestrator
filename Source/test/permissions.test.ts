@@ -15,6 +15,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { SKILLS } from '../src/contract/names.js';
+import { SKILL_VERSION } from '../src/cli/skills.js';
 import {
   PROTOCOL_VERSION,
   historicPointerBlocks,
@@ -432,6 +433,26 @@ test('the protocol version constant matches the shipped template', async () => {
   );
 });
 
+test('every skill template carries the current version marker', async () => {
+  // The same mismatch the protocol test above pins, one file further along, and with a
+  // worse failure: `agent skills` reads the version out of the *installed* copy, so a
+  // template whose marker was not bumped reports every agent as carrying the current
+  // skill while the text underneath it has changed. Staleness itself is decided by
+  // comparing content, which is why this went unnoticed — the marker is what an
+  // operator reads.
+  for (const name of SKILLS) {
+    const template = await readFile(
+      new URL(`../templates/skills/${name}/SKILL.md`, import.meta.url),
+      'utf8'
+    );
+    assert.match(
+      template,
+      new RegExp(`orchestrator-skill:${SKILL_VERSION}\\b`),
+      `${name}'s marker and SKILL_VERSION (${SKILL_VERSION}) disagree`
+    );
+  }
+});
+
 test('the protocol names the comms root, so an agent can find status.md', async () => {
   const a = agent();
   const rendered = await renderProtocol(config([a]), a);
@@ -451,13 +472,34 @@ test('the previous pointer wording is frozen, not regenerated from the current o
 
   const bodyOf = (b: string) => b.split('\n').slice(1).join('\n');
   const current = bodyOf(pointerBlock());
+
+  // The check is per-version, not blanket, because the version is bumped whenever
+  // either half changes and the protocol document changes far more often than the
+  // pointer. v7 moved the document alone, so v6's frozen text is *identical* to the
+  // current text and must be — an agent on v6 has exactly that on disk. What keeps it
+  // honest is the pin below, not an inequality: if someone rewrites the current body
+  // and the v6 entry follows it, the pinned text fails here.
   for (const b of historic) {
+    if (b.startsWith('<!-- orchestrator-protocol-ref:v6 -->')) continue;
     assert.notEqual(
       bodyOf(b),
       current,
       'a frozen body equals the current one — it was probably generated from it'
     );
   }
+
+  // Pinned against what v6 installed. It reads the same as the current wording today;
+  // the pin is what stops it silently becoming tomorrow's.
+  const v6 = historic.find((b) => b.startsWith('<!-- orchestrator-protocol-ref:v6 -->'));
+  assert.ok(v6, 'v6 is installed on real agents and must stay recognisable');
+  assert.ok(
+    v6.endsWith(
+      'In an ordinary interactive session, that file is also where to look if you find\n'
+        + 'work belonging to another agent, a file they own that needs changing, or a question\n'
+        + 'only they can answer. You can leave them a message with the `/ledger-note` skill.'
+    ),
+    'the v6 block must end exactly as it was installed'
+  );
 
   // Pinned against what was read back off a live agent at v5.
   const v5 = historic.find((b) => b.startsWith('<!-- orchestrator-protocol-ref:v5 -->'));

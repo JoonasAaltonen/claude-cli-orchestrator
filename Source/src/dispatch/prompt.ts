@@ -23,9 +23,9 @@
 import path from 'node:path';
 import type { Config, Agent } from '../config/load.js';
 import type { Fold, Outstanding, Thread } from '../ledger/fold.js';
-import { mayReadBody } from '../ledger/fold.js';
+import { mayReadBody, REASON_INFO } from '../ledger/fold.js';
 import type { Row } from '../ledger/row.js';
-import { OPERATOR } from '../ledger/row.js';
+import { OPERATOR, OUTCOME_INFO } from '../ledger/row.js';
 import { readText, readTextIfExists } from '../util/fsx.js';
 import { refTo } from '../util/paths.js';
 import { MCP_TOOL_ID, SKILL_COMMAND, installedSkillPath } from '../contract/names.js';
@@ -197,13 +197,15 @@ function buildPendingBlock(config: Config, agent: Agent, pending: Outstanding[])
   const lines: string[] = [];
   for (const p of pending) {
     const r = p.row;
-    const why =
-      p.reason === 'awaiting-signoff'
-        ? 'your sign-off is required (`needs`)'
-        : p.reason === 'unread-information'
-          ? 'this was sent to you to keep, and you have not acknowledged it'
-          : 'you have not answered this request';
-    lines.push(`### ${r.id} — from **${r.writer}** (${r.type})`);
+    const why = REASON_INFO[p.reason].onYou;
+    // For a delivered answer the heading names the row the agent wrote itself, which
+    // reads as nonsense — "from you" — unless it says so. The row that matters here is
+    // the answer, and it is listed below.
+    lines.push(
+      p.reason === 'undelivered-answer'
+        ? `### ${r.id} — **your own request** (${r.type})`
+        : `### ${r.id} — from **${r.writer}** (${r.type})`
+    );
     lines.push('');
     lines.push(`> ${r.summary}`);
     lines.push('');
@@ -236,6 +238,31 @@ function buildPendingBlock(config: Config, agent: Agent, pending: Outstanding[])
           + ' you kept it, and where — or you did not, and why, because "we already hold this"'
           + ' and "this contradicts what we hold" are worth very different follow-ups from'
           + ' whoever sent it. That is what closes it; until then it comes back to you.'
+      );
+    } else if (p.reason === 'undelivered-answer') {
+      // Nobody is waiting on work here either, and the default framing is worse than
+      // useless: an agent shown its own request with no explanation reads it as a job
+      // to do and does it again. What it is actually being handed is the answer.
+      lines.push(
+        `- **This is not new work.** You asked for this in an earlier invocation and do not`
+          + ' remember doing so. It has been answered. You are being invoked because nothing'
+          + ' has been done with the answer yet — that is the only reason this thread is'
+          + ' still moving.'
+      );
+      for (const a of p.answeredBy) {
+        const outcome = a.outcome ? OUTCOME_INFO[a.outcome] : null;
+        lines.push(
+          `- **${a.id}** — ${a.writer} answered \`${a.outcome ?? 'no outcome'}\`: ${a.summary}`
+            + (a.ref ? `\n  Full message: \`${refTo(config.commsRoot, a.ref)}\`` : '')
+            + (outcome ? `\n  ${outcome.onReceipt}` : '')
+        );
+      }
+      lines.push(
+        '- Then write one message into this thread. That is what closes it, and until you'
+          + ' write one you will be invoked again with the same answer. If the work it fed is'
+          + ' now finished, say so and say what you did — a `report` to whoever should know,'
+          + ' or to `operator` if nobody else is waiting. If it opened something new, send'
+          + ' that instead. What you must not do is nothing.'
       );
     } else {
       lines.push(`- Answer it with \`replyTo: ${r.id}\``);
